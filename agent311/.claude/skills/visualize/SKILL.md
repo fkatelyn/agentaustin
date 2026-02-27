@@ -13,10 +13,10 @@ description: >
   "compare", "top", "worst", "most common", "trend", "over time", "by district",
   "by zip", "breakdown", "distribution", "average", "which", or any question
   whose answer benefits from a visual representation.
-version: 3.0.0
+version: 4.0.0
 ---
 
-# Visualize Data
+# Visualize Data (DuckDB)
 
 Whenever you answer a data-related question, **always include a visualization**. There are two modes:
 
@@ -27,12 +27,12 @@ Whenever you answer a data-related question, **always include a visualization**.
 
 ## MODE 1: Plotly HTML (Default)
 
-Write a Python script using **pandas + plotly** to analyze data and generate an interactive HTML chart. Save it with `save_chart`, preview with `view_content`.
+Write a Python script using **DuckDB + plotly** to query data and generate an interactive HTML chart. Save it with `save_chart`, preview with `view_content`.
 
 ### Rules
 
 1. **Always visualize.** If your answer includes 3+ data points, generate a chart. No exceptions.
-2. **Pure Python.** Use pandas for data manipulation and plotly for charts. No HTML/JS string templating.
+2. **Use DuckDB for queries.** Query DuckDB directly, use `fetchdf()` to get pandas DataFrames for plotly.
 3. **Dark theme.** Use `template='plotly_dark'` with custom background colors to match the app aesthetic.
 4. **Save with `save_chart`.** ALWAYS use the `save_chart` MCP tool to save the final HTML. Do NOT use `Write` or `Bash` to write chart files. Filename convention: `<descriptive-name>-chart-<YYYY-MM-DD>.html`.
 5. **Preview with `view_content`.** After saving, call `view_content` on the saved path to display it in the artifact panel.
@@ -40,20 +40,40 @@ Write a Python script using **pandas + plotly** to analyze data and generate an 
 7. **Summarize in your response.** After generating the chart, include a brief text summary of the key findings in your message.
 8. **CDN mode.** Always use `include_plotlyjs='cdn'` in `write_html()` to keep file size small.
 
+### DuckDB Path
+
+```bash
+DATA_DIR="${RAILWAY_VOLUME_MOUNT_PATH:-$(cd "$(dirname "$(find . -name pyproject.toml -maxdepth 1)")" && pwd)/data}"
+DUCKDB_PATH="$DATA_DIR/311.duckdb"
+```
+
 ### Python Template
 
 ```python
-import pandas as pd
+import duckdb
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# Read data
-df = pd.read_csv("<CSV_PATH>")
+DUCKDB_PATH = '<DUCKDB_PATH>'  # substitute actual path
+con = duckdb.connect(DUCKDB_PATH)
 
-# Filter / aggregate
-filtered = df[df['sr_type_desc'].str.contains('Pothole', case=False, na=False)]
-daily = filtered.groupby(filtered['sr_created_date'].str[:10]).size().reset_index(name='count')
+# Query and get DataFrame
+df = con.execute("""
+    SELECT sr_type_desc, COUNT(*) as cnt
+    FROM service_requests
+    WHERE sr_type_desc LIKE '%Pothole%'
+    GROUP BY sr_type_desc ORDER BY cnt DESC
+""").fetchdf()
+
+daily = con.execute("""
+    SELECT sr_created_date::DATE as day, COUNT(*) as count
+    FROM service_requests
+    WHERE sr_type_desc LIKE '%Pothole%'
+    GROUP BY day ORDER BY day
+""").fetchdf()
+
+con.close()
 
 # Build figure
 fig = make_subplots(
@@ -62,12 +82,8 @@ fig = make_subplots(
     specs=[[{'type': 'xy'}, {'type': 'domain'}]]
 )
 
-fig.add_trace(go.Bar(x=daily.iloc[:, 0], y=daily['count'],
+fig.add_trace(go.Bar(x=daily['day'], y=daily['count'],
     marker_color='#00d2ff'), row=1, col=1)
-
-status = filtered['sr_status_desc'].value_counts()
-fig.add_trace(go.Pie(labels=status.index, values=status.values,
-    hole=0.4, marker=dict(colors=COLORS)), row=1, col=2)
 
 # Apply dark theme
 fig.update_layout(
@@ -117,7 +133,7 @@ COLORS = [
 
 ### Workflow
 
-1. Write a Python script using pandas + plotly to read CSV, aggregate, and build the chart
+1. Write a Python script using duckdb + plotly to query data and build the chart
 2. Run the script with `uv run python3 /tmp/chart_script.py` (write script to /tmp first)
 3. The script saves HTML to `/tmp/<name>.html` via `fig.write_html(..., include_plotlyjs='cdn')`
 4. Read the HTML file content back, then call `save_chart(filename="<name>-chart-<YYYY-MM-DD>.html", content=<html_string>, encoding="text")` to persist it
@@ -172,32 +188,6 @@ Mar  █████████████████████████
 6-12 hrs   ████████░░░░░░░░░░░░░░░░░░░░   288 (10%)
 
 Median: 12.3 hours  ·  Mean: 17.0 hours
-```
-
-**Heat Strip (hour/day patterns):**
-```
- 8:00  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓   212
-11:00  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  246 ◄── peak
-```
-Use `▓` for heat strips.
-
-**Comparison Table:**
-```
-┌──────────────────┬────────────┬────────────┐
-│  Metric          │  Group A   │  Group B   │
-├──────────────────┼────────────┼────────────┤
-│  Fix rate        │  100%      │  96.3%     │
-└──────────────────┴────────────┴────────────┘
-```
-
-**Summary Box:**
-```
-╔══════════════════════════════════════════════╗
-║  KEY TAKEAWAYS                              ║
-╠══════════════════════════════════════════════╣
-║  · First insight with specific number       ║
-║  · Second insight with specific number      ║
-╚══════════════════════════════════════════════╝
 ```
 
 ### Bar Scaling

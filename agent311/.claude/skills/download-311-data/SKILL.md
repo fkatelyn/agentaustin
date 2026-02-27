@@ -5,12 +5,12 @@ description: >
   "fetch Austin 311", "update 311 data", "refresh 311 data",
   "download service requests", or discusses downloading or updating
   City of Austin 311 service request data.
-version: 1.1.0
+version: 2.0.0
 ---
 
-# Download Austin 311 Data
+# Download / Update Austin 311 Data (DuckDB)
 
-Download City of Austin 311 service request data from the Socrata Open Data API.
+Download City of Austin 311 service request data from the Socrata Open Data API into a local DuckDB database.
 
 ## Data Source
 
@@ -18,57 +18,174 @@ Download City of Austin 311 service request data from the Socrata Open Data API.
 - **Dataset ID:** `xwdj-i9he`
 - **API endpoint:** `https://data.austintexas.gov/resource/xwdj-i9he.csv`
 - **No API key required** for reasonable request volumes
+- **Full dataset:** ~7.8M records from 2014-present
 
-## Steps
-
-### 1. Date Range
-
-Default: January 1 of last year to present. This matches what `start.sh` downloads on startup.
-
-### 2. Determine the Data Directory
-
-The data directory uses the Railway persistent volume when deployed, with a local fallback:
+## DuckDB Path
 
 ```bash
 DATA_DIR="${RAILWAY_VOLUME_MOUNT_PATH:-$(cd "$(dirname "$(find . -name pyproject.toml -maxdepth 1)")" && pwd)/data}"
+DUCKDB_PATH="$DATA_DIR/311.duckdb"
 mkdir -p "$DATA_DIR"
 ```
 
-In practice:
-- **Railway:** `$RAILWAY_VOLUME_MOUNT_PATH` (persistent across deploys)
-- **Local:** `data/` relative to the `agent311/` directory (next to `pyproject.toml`)
+## Modes
 
-### 3. Download the Data
+### Mode 1: Full Download (empty database or user requests full refresh)
 
-Fetch via curl into the data directory:
+Use this when the DuckDB database doesn't exist, the `service_requests` table is empty, no local CSV is available, or the user explicitly asks to re-download all data.
 
-```bash
-curl -s "https://data.austintexas.gov/resource/xwdj-i9he.csv?\$where=sr_created_date>='<START_DATE>T00:00:00'&\$limit=100000&\$offset=0" \
-  -o "$DATA_DIR/311_recent.csv"
+Write and run this Python script:
+
+```python
+import duckdb
+import urllib.request
+import os
+
+DUCKDB_PATH = '<DUCKDB_PATH>'  # substitute actual path
+LIMIT = 100000
+
+con = duckdb.connect(DUCKDB_PATH)
+
+# Get total count from API
+count_url = "https://data.austintexas.gov/resource/xwdj-i9he.csv?$select=count(*)&$limit=1"
+response = urllib.request.urlopen(count_url)
+total = int(response.read().decode().strip().split('\n')[1].strip('"'))
+print(f"Total records available from API: {total:,}")
+
+# Drop existing table for full re-download
+con.execute("DROP TABLE IF EXISTS service_requests")
+
+offset = 0
+chunk = 0
+while offset < total:
+    url = f"https://data.austintexas.gov/resource/xwdj-i9he.csv?$limit={LIMIT}&$offset={offset}&$order=:id"
+    print(f"Downloading chunk {chunk} (offset={offset:,} / {total:,})...")
+    response = urllib.request.urlopen(url)
+    tmp = '/tmp/311_chunk.csv'
+    with open(tmp, 'wb') as f:
+        f.write(response.read())
+
+    rows = con.execute(f"SELECT count(*) FROM read_csv_auto('{tmp}', all_varchar=true)").fetchone()[0]
+
+    if chunk == 0:
+        con.execute(f"CREATE TABLE service_requests AS SELECT * FROM read_csv_auto('{tmp}', all_varchar=true)")
+    else:
+        con.execute(f"INSERT INTO service_requests SELECT * FROM read_csv_auto('{tmp}', all_varchar=true)")
+
+    os.unlink(tmp)
+    offset += LIMIT
+    chunk += 1
+    loaded = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+    print(f"  Loaded {loaded:,} rows so far")
+
+    if rows < LIMIT:
+        break
+
+# Add index on sr_number for fast merges
+con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sr_number ON service_requests(sr_number)")
+
+final = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+date_range = con.execute("SELECT MIN(sr_created_date), MAX(sr_created_date) FROM service_requests").fetchone()
+print(f"\nDone! {final:,} rows loaded")
+print(f"Date range: {date_range[0]} to {date_range[1]}")
+con.close()
 ```
 
-**Pagination:** The Socrata API returns max 100,000 rows per request. If the dataset may exceed this:
-1. First check the count: `$select=count(*)&$where=sr_created_date>='<START_DATE>T00:00:00'`
-2. If count > 100,000, paginate using `$offset` in increments of 100,000 and concatenate results
+### Mode 2: Update / Merge (database already has data)
 
-### 4. Verify the Download
+Use this when the database already has data and the user wants to refresh with recent records. Downloads data since the latest record and merges using `sr_number` to avoid duplicates.
 
-After downloading, verify by running:
-```bash
-wc -l "$DATA_DIR/311_recent.csv"
-head -2 "$DATA_DIR/311_recent.csv"
+```python
+import duckdb
+import urllib.request
+import os
+from datetime import datetime, timedelta
+
+DUCKDB_PATH = '<DUCKDB_PATH>'  # substitute actual path
+LIMIT = 100000
+
+con = duckdb.connect(DUCKDB_PATH)
+
+# Find the latest date in the database
+latest = con.execute("SELECT MAX(sr_created_date) FROM service_requests").fetchone()[0]
+current_count = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+print(f"Current rows in DB: {current_count:,}")
+print(f"Latest record date: {latest}")
+
+# Fetch from 2 days before latest (overlap to catch late-arriving records)
+start_date = (datetime.fromisoformat(str(latest)[:19]) - timedelta(days=2)).strftime('%Y-%m-%dT00:00:00')
+print(f"Fetching records from {start_date}...")
+
+offset = 0
+total_processed = 0
+total_new = 0
+
+while True:
+    url = (
+        f"https://data.austintexas.gov/resource/xwdj-i9he.csv"
+        f"?$where=sr_created_date>='{start_date}'"
+        f"&$limit={LIMIT}&$offset={offset}&$order=:id"
+    )
+    response = urllib.request.urlopen(url)
+    tmp = '/tmp/311_update.csv'
+    with open(tmp, 'wb') as f:
+        f.write(response.read())
+
+    rows = con.execute(f"SELECT count(*) FROM read_csv_auto('{tmp}', all_varchar=true)").fetchone()[0]
+    if rows == 0:
+        os.unlink(tmp)
+        break
+
+    # Merge via staging table: delete matching sr_numbers then insert all
+    con.execute(f"CREATE TEMPORARY TABLE staging AS SELECT * FROM read_csv_auto('{tmp}', all_varchar=true)")
+    deleted = con.execute("DELETE FROM service_requests WHERE sr_number IN (SELECT sr_number FROM staging)").fetchone()[0]
+    con.execute("INSERT INTO service_requests SELECT * FROM staging")
+    con.execute("DROP TABLE staging")
+
+    new_rows = rows - deleted
+    total_processed += rows
+    total_new += new_rows
+    offset += LIMIT
+    os.unlink(tmp)
+    print(f"  Processed {total_processed:,} records ({total_new:,} new, {total_processed - total_new:,} updated)")
+
+    if rows < LIMIT:
+        break
+
+final = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+date_range = con.execute("SELECT MIN(sr_created_date), MAX(sr_created_date) FROM service_requests").fetchone()
+print(f"\nDone! DB now has {final:,} rows ({total_new:,} new records added)")
+print(f"Date range: {date_range[0]} to {date_range[1]}")
+con.close()
 ```
 
-Report to the user:
-- Number of records downloaded
-- Date range covered
-- File location
+## Decision Logic
+
+1. Check if DuckDB exists and has data:
+   ```python
+   import duckdb, os
+   DUCKDB_PATH = '<path>'
+   if not os.path.exists(DUCKDB_PATH):
+       print("No database found — use Mode 1 (full download)")
+   else:
+       con = duckdb.connect(DUCKDB_PATH)
+       try:
+           count = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+           print(f"Database has {count:,} rows — use Mode 2 (update/merge)")
+       except:
+           print("Table missing — use Mode 1 (full download)")
+       con.close()
+   ```
+
+2. If DuckDB is empty/missing → **Mode 1** (full API download)
+3. If user says "download all", "re-download", "fresh download" → **Mode 1**
+4. If user says "update", "refresh", "get latest" → **Mode 2**
 
 ## Dataset Columns
 
 | Column | Description |
 |--------|-------------|
-| `sr_number` | Unique service request ID |
+| `sr_number` | Unique service request ID (used as merge key) |
 | `sr_type_desc` | Request type (e.g., "ARR - Garbage") |
 | `sr_department_desc` | Responsible city department |
 | `sr_method_received_desc` | How it was reported (Phone, App, Web) |
@@ -78,57 +195,15 @@ Report to the user:
 | `sr_updated_date` | Last update timestamp |
 | `sr_closed_date` | When the request was closed |
 | `sr_location` | Full address string |
-| `sr_location_street_number` | Street number |
-| `sr_location_street_name` | Street name |
-| `sr_location_city` | City |
 | `sr_location_zip_code` | ZIP code |
-| `sr_location_county` | County |
-| `sr_location_x` | X coordinate (state plane) |
-| `sr_location_y` | Y coordinate (state plane) |
 | `sr_location_lat` | Latitude |
 | `sr_location_long` | Longitude |
-| `sr_location_lat_long` | Point geometry (WKT) |
 | `sr_location_council_district` | City council district number |
-| `sr_location_map_page` | Map page reference |
-| `sr_location_map_tile` | Map tile reference |
-
-## Filtering Options
-
-The Socrata SoQL API supports additional filters via `$where`:
-
-```
-# By department
-$where=sr_department_desc='Austin Resource Recovery'
-
-# By request type
-$where=sr_type_desc='ARR - Garbage'
-
-# By ZIP code
-$where=sr_location_zip_code='78704'
-
-# By status
-$where=sr_status_desc='Open'
-
-# Combined filters
-$where=sr_created_date>='2026-01-01' AND sr_department_desc='Austin Resource Recovery'
-```
-
-Pass any user-specified filters into the `$where` clause.
-
-## Update / Delta Merge
-
-When updating an existing `311_recent.csv` (e.g., "refresh 311 data", "update 311 data"), use the `download_311.py` module which handles incremental updates automatically:
-
-```bash
-cd agent311 && uv run python -m agent311.download_311
-```
-
-This script:
-1. If `311_recent.csv` doesn't exist → full paginated download from Jan 1 of last year
-2. If `311_recent.csv` exists → reads the latest `sr_created_date`, fetches only newer rows, merges with deduplication by `sr_number`
-
-Deduplication uses `sr_number` as the unique key — keeping the newer row ensures updated records overwrite stale ones.
 
 ## Output
 
-Save to `$DATA_DIR/311_recent.csv` (matching what `start.sh` downloads on startup). This ensures the deployed agent's system prompt `CSV_PATH` always points to the freshest data.
+Report to the user:
+- Total rows in database
+- Number of new records (for updates)
+- Date range covered
+- Database file location and size

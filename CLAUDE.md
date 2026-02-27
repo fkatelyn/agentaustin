@@ -11,14 +11,14 @@ Agent Austin is an AI-powered data science agent for Austin 311 service request 
 - **Backend:** FastAPI + Claude Agent SDK (`claude-agent-sdk`)
 - **Frontend:** shadcn + AI Elements
 - **Database:** PostgreSQL
-- **Data Analysis:** pandas + plotly (charts), kaleido (PNG/PDF export)
+- **Data Analysis:** DuckDB + pandas + plotly (charts), kaleido (PNG/PDF export)
 - **Package Manager:** uv (Python), npm (JavaScript)
 - **Deployment:** Railway (Railpack builder, persistent volume for data)
 
 ## Architecture
 
 ### Backend (`agent311/`)
-- Self-contained backend directory with its own `pyproject.toml`, `uv.lock`, `railpack.json`, `railway.json`, and `start.sh`
+- Self-contained backend directory with its own `pyproject.toml`, `uv.lock`, `railpack.json`, `railway.json`, `start.sh`
 - Python package: `agent311/agent311/` — contains `main.py`, `auth.py`, `db.py`
 - Entry point: `agent311/agent311/main.py` — FastAPI app with CORS-enabled streaming chat endpoint
 - Chat endpoint: `POST /api/chat` — accepts messages array + optional session_id, returns SSE stream in Vercel AI SDK v6 protocol format
@@ -39,8 +39,8 @@ Agent Austin is an AI-powered data science agent for Austin 311 service request 
 - Backend uses `agent311/railpack.json`; uv auto-detected via mise from `pyproject.toml` + `uv.lock`
 - Frontend uses `agentui/railpack.json`; Node.js and Next.js auto-detected; `NEXT_PUBLIC_API_URL` set in Railway dashboard
 - Railway auto-detects uv via `agent311/pyproject.toml` + `agent311/uv.lock`
-- Start command: `bash start.sh` (downloads year-to-date 311 data, starts uvicorn)
-- Persistent volume (`RAILWAY_VOLUME_MOUNT_PATH`) stores CSV data, reports, and charts across deploys
+- Start command: `bash start.sh` (downloads all 311 data into DuckDB if empty, starts uvicorn)
+- Persistent volume (`RAILWAY_VOLUME_MOUNT_PATH`) stores DuckDB database, reports, and charts across deploys
 
 ## Development Commands
 
@@ -95,8 +95,7 @@ npm run start
 - `agent311/pyproject.toml` + `agent311/uv.lock` — Python dependencies
 - `agent311/railpack.json` — Backend Railway build config (system packages, Claude Code CLI install step)
 - `agent311/railway.json` — Specifies Railpack builder
-- `agent311/start.sh` — Startup script (downloads/updates 311 data via `download_311.py`, starts uvicorn)
-- `agent311/agent311/download_311.py` — 311 data downloader with pagination and delta merge (dedup by `sr_number`)
+- `agent311/start.sh` — Startup script (downloads all 311 data into DuckDB if empty, starts uvicorn)
 - `agent311/.python-version` — Pins Python 3.12
 - `agent311/agent311/main.py` — FastAPI app, all endpoints, SSE streaming, MCP tools
 - `agent311/agent311/db.py` — SQLAlchemy async ORM, PostgreSQL config, Session/Message models
@@ -112,11 +111,13 @@ npm run start
 ## Data & Persistent Storage
 
 - **Volume mount:** `RAILWAY_VOLUME_MOUNT_PATH` on Railway; falls back to `data/` relative to `agent311/` locally
-- **311 CSV:** `<volume>/311_recent.csv` — from Jan 1 of last year, downloaded/updated incrementally by `start.sh` on startup
+- **DuckDB:** `<volume>/311.duckdb` — all 311 data (~7.8M rows from 2014-present), loaded via download-311-data skill
 - **Reports:** `<volume>/reports/` — user-curated HTML/CSV/PNG reports, shown in sidebar file tree
 - **Charts:** `<volume>/analysis/charts/` — agent-generated plotly charts, previewed in artifact panel
 - The `data/` directory is gitignored — generated data should never be committed
 - Data source: City of Austin Open Data (Socrata API), dataset ID `xwdj-i9he`
+- Data is NOT downloaded on startup — use the download-311-data skill to populate the DuckDB database
+- Updates use merge (staging table + sr_number dedup) to avoid duplicates
 
 ## Environment Variables
 
