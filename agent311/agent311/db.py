@@ -59,7 +59,7 @@ class Session(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
-    is_favorite = Column(Boolean, nullable=False, server_default=text("0"), default=False)
+    is_favorite = Column(Boolean, nullable=False, server_default=text("false"), default=False)
 
     messages = relationship(
         "Message", back_populates="session", cascade="all, delete-orphan", order_by="Message.created_at"
