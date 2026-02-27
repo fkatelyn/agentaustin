@@ -30,7 +30,7 @@ try:
         print(f'[data] Skipping download — data already loaded')
         con.close()
         sys.exit(0)
-except:
+except Exception:
     pass
 
 print('=' * 50)
