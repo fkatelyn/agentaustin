@@ -5,210 +5,203 @@ description: >
   "311 insights", "311 statistics", "311 trends", "what's interesting in 311",
   "show 311 charts", "311 bar chart", "311 report", or discusses analyzing,
   exploring, or visualizing Austin 311 service request data.
-version: 1.0.0
+version: 2.0.0
 ---
 
-# Analyze Austin 311 Data
+# Analyze Austin 311 Data (DuckDB)
 
-Run exploratory analysis on local Austin 311 CSV data and present findings with ASCII visualizations.
+Run exploratory analysis on the local DuckDB database and present findings.
 
 ## Prerequisites
 
-A 311 data CSV must exist in the `data/` directory (e.g., `data/austin_311_data.csv` or `data/austin_311_last_month.csv`). If no file exists, tell the user to run `/download-311-data` first.
+The DuckDB database must exist with data. Check first:
+```python
+import duckdb, os
+DUCKDB_PATH = '<volume>/311.duckdb'  # substitute actual path
+if not os.path.exists(DUCKDB_PATH):
+    print("No database found — run /download-311-data first")
+else:
+    con = duckdb.connect(DUCKDB_PATH)
+    count = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+    print(f"Database has {count:,} rows")
+    con.close()
+```
 
-## Steps
+If no data exists, tell the user to run `/download-311-data` first.
 
-### 1. Find the Data File
+## DuckDB Path
 
-Look for CSV files in `data/` containing `311` in the name. If multiple exist, use the largest or ask the user which one.
+```bash
+DATA_DIR="${RAILWAY_VOLUME_MOUNT_PATH:-$(cd "$(dirname "$(find . -name pyproject.toml -maxdepth 1)")" && pwd)/data}"
+DUCKDB_PATH="$DATA_DIR/311.duckdb"
+```
 
-### 2. Run the Analysis
+## Analysis Script
 
-Execute the following Python script with `uv run python3`, adapting the filename as needed:
+Run this Python script with `uv run python3`. All queries use DuckDB SQL for speed:
 
 ```python
-import csv
-from collections import Counter
-from datetime import datetime, timedelta
+import duckdb
 
-FILENAME = 'data/austin_311_last_month.csv'  # adjust to actual file
+DUCKDB_PATH = '<DUCKDB_PATH>'  # substitute actual path
+con = duckdb.connect(DUCKDB_PATH)
 
-with open(FILENAME, 'r') as f:
-    rows = list(csv.DictReader(f))
-
-def parse_date(d):
-    try: return datetime.strptime(d[:19], '%Y-%m-%dT%H:%M:%S')
-    except: return None
-
-print(f"Total requests: {len(rows)}\n")
+total = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+print(f"Total requests: {total:,}\n")
 
 # --- Top 15 request types ---
-types = Counter(r['sr_type_desc'] for r in rows)
 print("=== TOP 15 REQUEST TYPES ===")
-for t, c in types.most_common(15):
-    print(f"  {c:>5}  {t}")
+for row in con.execute("""
+    SELECT sr_type_desc, COUNT(*) as cnt
+    FROM service_requests GROUP BY sr_type_desc ORDER BY cnt DESC LIMIT 15
+""").fetchall():
+    print(f"  {row[1]:>7,}  {row[0]}")
 
 # --- By department ---
-depts = Counter(r['sr_department_desc'] for r in rows)
 print("\n=== BY DEPARTMENT ===")
-for d, c in depts.most_common():
-    print(f"  {c:>5}  {d}")
+for row in con.execute("""
+    SELECT sr_department_desc, COUNT(*) as cnt
+    FROM service_requests GROUP BY sr_department_desc ORDER BY cnt DESC
+""").fetchall():
+    print(f"  {row[1]:>7,}  {row[0]}")
 
 # --- Status breakdown ---
-statuses = Counter(r['sr_status_desc'] for r in rows)
 print("\n=== STATUS ===")
-for s, c in statuses.most_common():
-    print(f"  {c:>5}  {s}")
+for row in con.execute("""
+    SELECT sr_status_desc, COUNT(*) as cnt
+    FROM service_requests GROUP BY sr_status_desc ORDER BY cnt DESC
+""").fetchall():
+    print(f"  {row[1]:>7,}  {row[0]}")
 
 # --- How reported ---
-methods = Counter(r['sr_method_received_desc'] for r in rows)
 print("\n=== HOW REPORTED ===")
-for m, c in methods.most_common():
-    print(f"  {c:>5}  {m}")
+for row in con.execute("""
+    SELECT sr_method_received_desc, COUNT(*) as cnt
+    FROM service_requests GROUP BY sr_method_received_desc ORDER BY cnt DESC
+""").fetchall():
+    print(f"  {row[1]:>7,}  {row[0]}")
 
-# --- Temporal patterns ---
-days = Counter()
-hours = Counter()
-daily_counts = Counter()
-for r in rows:
-    dt = parse_date(r['sr_created_date'])
-    if dt:
-        days[dt.strftime('%A')] += 1
-        hours[dt.hour] += 1
-        daily_counts[dt.strftime('%Y-%m-%d')] += 1
-
+# --- By day of week ---
 print("\n=== BY DAY OF WEEK ===")
-for d in ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']:
-    print(f"  {days[d]:>5}  {d}")
+for row in con.execute("""
+    SELECT dayname(sr_created_date::TIMESTAMP) as dow, COUNT(*) as cnt
+    FROM service_requests
+    WHERE sr_created_date IS NOT NULL
+    GROUP BY dow ORDER BY cnt DESC
+""").fetchall():
+    print(f"  {row[1]:>7,}  {row[0]}")
 
+# --- By hour of day ---
 print("\n=== BY HOUR OF DAY ===")
-for h in sorted(hours.keys()):
-    bar = '#' * (hours[h] // 40)
-    print(f"  {h:>2}:00  {hours[h]:>5}  {bar}")
+for row in con.execute("""
+    SELECT hour(sr_created_date::TIMESTAMP) as hr, COUNT(*) as cnt
+    FROM service_requests
+    WHERE sr_created_date IS NOT NULL
+    GROUP BY hr ORDER BY hr
+""").fetchall():
+    bar = '#' * (row[1] // 5000)
+    print(f"  {row[0]:>2}:00  {row[1]:>7,}  {bar}")
 
-# --- Busiest / quietest days ---
+# --- Busiest days ---
 print("\n=== BUSIEST DAYS ===")
-for d, c in daily_counts.most_common(5):
-    print(f"  {c:>5}  {d}")
-print("\n=== QUIETEST DAYS ===")
-for d, c in sorted(daily_counts.items(), key=lambda x: x[1])[:5]:
-    print(f"  {c:>5}  {d}")
+for row in con.execute("""
+    SELECT sr_created_date::DATE as d, COUNT(*) as cnt
+    FROM service_requests
+    WHERE sr_created_date IS NOT NULL
+    GROUP BY d ORDER BY cnt DESC LIMIT 5
+""").fetchall():
+    print(f"  {row[1]:>7,}  {row[0]}")
 
-# --- Top ZIP codes ---
-zips = Counter(r['sr_location_zip_code'] for r in rows if r['sr_location_zip_code'])
+# --- Top 10 ZIP codes ---
 print("\n=== TOP 10 ZIP CODES ===")
-for z, c in zips.most_common(10):
-    print(f"  {c:>5}  {z}")
+for row in con.execute("""
+    SELECT sr_location_zip_code, COUNT(*) as cnt
+    FROM service_requests
+    WHERE sr_location_zip_code IS NOT NULL AND sr_location_zip_code != ''
+    GROUP BY sr_location_zip_code ORDER BY cnt DESC LIMIT 10
+""").fetchall():
+    print(f"  {row[1]:>7,}  {row[0]}")
 
-# --- Council districts ---
-districts = Counter(r['sr_location_council_district'] for r in rows if r['sr_location_council_district'])
+# --- By council district ---
 print("\n=== BY COUNCIL DISTRICT ===")
-for d, c in sorted(districts.items(), key=lambda x: -x[1]):
-    print(f"  {c:>5}  District {d}")
+for row in con.execute("""
+    SELECT sr_location_council_district, COUNT(*) as cnt
+    FROM service_requests
+    WHERE sr_location_council_district IS NOT NULL AND sr_location_council_district != ''
+    GROUP BY sr_location_council_district ORDER BY cnt DESC
+""").fetchall():
+    print(f"  {row[1]:>7,}  District {row[0]}")
 
-# --- Resolution time ---
-resolution_times = []
-for r in rows:
-    if r['sr_status_desc'] == 'Closed' and r['sr_created_date'] and r['sr_closed_date']:
-        created = parse_date(r['sr_created_date'])
-        closed = parse_date(r['sr_closed_date'])
-        if created and closed and closed >= created:
-            resolution_times.append((closed - created).total_seconds() / 3600)
+# --- Resolution time stats ---
+print("\n=== RESOLUTION TIME (closed requests) ===")
+res = con.execute("""
+    SELECT
+        COUNT(*) as total,
+        AVG(EPOCH(sr_closed_date::TIMESTAMP - sr_created_date::TIMESTAMP) / 3600) as avg_hours,
+        MEDIAN(EPOCH(sr_closed_date::TIMESTAMP - sr_created_date::TIMESTAMP) / 3600) as med_hours,
+        MIN(EPOCH(sr_closed_date::TIMESTAMP - sr_created_date::TIMESTAMP) / 3600) as min_hours,
+        MAX(EPOCH(sr_closed_date::TIMESTAMP - sr_created_date::TIMESTAMP) / 3600) as max_hours
+    FROM service_requests
+    WHERE sr_status_desc = 'Closed'
+      AND sr_created_date IS NOT NULL AND sr_closed_date IS NOT NULL
+      AND sr_closed_date >= sr_created_date
+""").fetchone()
+print(f"  Total closed: {res[0]:,}")
+if res[0] > 0:
+    print(f"  Avg resolution: {res[1]:.1f} hours ({res[1]/24:.1f} days)")
+    print(f"  Median resolution: {res[2]:.1f} hours ({res[2]/24:.1f} days)")
+    print(f"  Fastest: {res[3]:.2f} hours")
+    print(f"  Slowest: {res[4]:.1f} hours ({res[4]/24:.0f} days)")
 
-print(f"\n=== RESOLUTION TIME (closed requests) ===")
-print(f"  Total closed: {len(resolution_times)}")
-if resolution_times:
-    avg = sum(resolution_times) / len(resolution_times)
-    resolution_times.sort()
-    median = resolution_times[len(resolution_times)//2]
-    print(f"  Avg resolution: {avg:.1f} hours ({avg/24:.1f} days)")
-    print(f"  Median resolution: {median:.1f} hours ({median/24:.1f} days)")
-    print(f"  Fastest: {resolution_times[0]:.2f} hours")
-    print(f"  Slowest: {resolution_times[-1]:.1f} hours ({resolution_times[-1]/24:.0f} days)")
-
-    # Resolution by type (top 10)
-    print("\n=== AVG RESOLUTION BY TYPE (top 10 types) ===")
-    type_res = {}
-    for r in rows:
-        if r['sr_status_desc'] == 'Closed' and r['sr_created_date'] and r['sr_closed_date']:
-            created = parse_date(r['sr_created_date'])
-            closed = parse_date(r['sr_closed_date'])
-            if created and closed and closed >= created:
-                t = r['sr_type_desc']
-                type_res.setdefault(t, []).append((closed - created).total_seconds() / 3600)
-    top_types = [t for t, _ in types.most_common(10)]
-    for t in top_types:
-        if t in type_res:
-            vals = type_res[t]
-            avg_t = sum(vals) / len(vals)
-            vals.sort()
-            med_t = vals[len(vals)//2]
-            print(f"  {avg_t:>7.1f}h avg | {med_t:>6.1f}h med  {t} (n={len(vals)})")
+# --- Avg resolution by type (top 10 types) ---
+print("\n=== AVG RESOLUTION BY TYPE (top 10 types) ===")
+for row in con.execute("""
+    WITH top_types AS (
+        SELECT sr_type_desc FROM service_requests GROUP BY sr_type_desc ORDER BY COUNT(*) DESC LIMIT 10
+    )
+    SELECT
+        s.sr_type_desc,
+        COUNT(*) as n,
+        AVG(EPOCH(s.sr_closed_date::TIMESTAMP - s.sr_created_date::TIMESTAMP) / 3600) as avg_h,
+        MEDIAN(EPOCH(s.sr_closed_date::TIMESTAMP - s.sr_created_date::TIMESTAMP) / 3600) as med_h
+    FROM service_requests s
+    JOIN top_types t ON s.sr_type_desc = t.sr_type_desc
+    WHERE s.sr_status_desc = 'Closed'
+      AND s.sr_created_date IS NOT NULL AND s.sr_closed_date IS NOT NULL
+      AND s.sr_closed_date >= s.sr_created_date
+    GROUP BY s.sr_type_desc
+    ORDER BY avg_h DESC
+""").fetchall():
+    print(f"  {row[2]:>7.1f}h avg | {row[3]:>6.1f}h med  {row[0]} (n={row[1]:,})")
 
 # --- Still open requests ---
-open_reqs = [r for r in rows if r['sr_status_desc'] != 'Closed']
-open_types = Counter(r['sr_type_desc'] for r in open_reqs)
-print(f"\n=== STILL OPEN - BY TYPE ===")
-print(f"  Total open: {len(open_reqs)}")
-for t, c in open_types.most_common(10):
-    print(f"  {c:>5}  {t}")
+print("\n=== STILL OPEN - BY TYPE ===")
+open_count = con.execute("SELECT count(*) FROM service_requests WHERE sr_status_desc != 'Closed'").fetchone()[0]
+print(f"  Total open: {open_count:,}")
+for row in con.execute("""
+    SELECT sr_type_desc, COUNT(*) as cnt
+    FROM service_requests WHERE sr_status_desc != 'Closed'
+    GROUP BY sr_type_desc ORDER BY cnt DESC LIMIT 10
+""").fetchall():
+    print(f"  {row[1]:>7,}  {row[0]}")
 
-# --- Oldest open requests ---
-print("\n=== OLDEST STILL-OPEN REQUESTS ===")
-open_with_dates = [(r, parse_date(r['sr_created_date'])) for r in open_reqs]
-open_with_dates = [(r, d) for r, d in open_with_dates if d]
-open_with_dates.sort(key=lambda x: x[1])
-now = datetime.now()
-for r, d in open_with_dates[:5]:
-    age = (now - d).days
-    print(f"  {age:>3} days old  {r['sr_type_desc']}  ({r['sr_number']})")
+# --- Date range ---
+print("\n=== DATA RANGE ===")
+dr = con.execute("SELECT MIN(sr_created_date), MAX(sr_created_date) FROM service_requests").fetchone()
+print(f"  From: {dr[0]}")
+print(f"  To:   {dr[1]}")
+
+con.close()
 ```
 
-### 3. Daily Bar Chart (Past 7 Days)
+## Summarize Key Findings
 
-After the main analysis, generate an ASCII bar chart of the past 7 days:
+After running the analysis, write a summary highlighting:
 
-```python
-from datetime import datetime, timedelta
+- **Volume:** Most common request types and departments
+- **Performance:** Resolution times — fastest/slowest types
+- **Geography:** Top ZIPs and council districts
+- **Timing:** Day of week / hour patterns, anomalous days
+- **Backlogs:** Still-open request categories
 
-today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-start = today - timedelta(days=6)
-
-daily = Counter()
-for r in rows:
-    dt = parse_date(r['sr_created_date'])
-    if dt and start <= dt:
-        daily[dt.strftime('%Y-%m-%d')] += 1
-
-chart_days = []
-for i in range(7):
-    d = start + timedelta(days=i)
-    key = d.strftime('%Y-%m-%d')
-    label = d.strftime('%a %m/%d')
-    chart_days.append((key, label, daily.get(key, 0)))
-
-max_count = max((c for _, _, c in chart_days), default=1)
-bar_width = 50
-
-print("\n  Austin 311 Requests — Past 7 Days")
-print("  " + "=" * 58)
-print()
-for key, label, count in chart_days:
-    filled = int((count / max_count) * bar_width) if max_count > 0 else 0
-    bar = '█' * filled
-    print(f"  {label}  {bar} {count}")
-print()
-print(f"  Total: {sum(c for _, _, c in chart_days):,} requests")
-```
-
-### 4. Summarize Key Findings
-
-After running the analysis, write a summary highlighting the most interesting findings. Focus on:
-
-- **Volume:** What are the most common request types?
-- **Performance:** Which types resolve fastest/slowest? What's the open rate?
-- **Geography:** Which ZIPs and districts generate the most requests?
-- **Timing:** What day/hour patterns exist? Any anomalous days?
-- **Backlogs:** Which categories have the most still-open requests?
-
-Present these as a numbered list of key takeaways, with specific numbers.
+Present as a numbered list of key takeaways with specific numbers.

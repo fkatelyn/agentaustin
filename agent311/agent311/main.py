@@ -46,6 +46,7 @@ _volume_mount = os.environ.get(
     "RAILWAY_VOLUME_MOUNT_PATH",
     str(Path(__file__).resolve().parent.parent / "data"),
 )
+DUCKDB_PATH = Path(_volume_mount) / "311.duckdb"
 REPORTS_DIR = Path(_volume_mount) / "reports"
 CHARTS_DIR = Path(_volume_mount) / "analysis" / "charts"
 
@@ -70,8 +71,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CSV_PATH = Path(_volume_mount) / "311_recent.csv"
-
 SYSTEM_PROMPT = f"""You are Agent 311, an AI assistant specializing in Austin 311 service request data.
 
 You help users explore and analyze Austin's 311 service requests, which include:
@@ -84,20 +83,51 @@ You help users explore and analyze Austin's 311 service requests, which include:
 
 The 311 dataset contains ~7.8M service requests from 2014-present, available via the City of Austin Open Data Portal (data.austintexas.gov). Data is updated in real-time with 1,500-2,000 new requests daily.
 
-Key fields include: service request number, type, description, status, created/close dates, location, coordinates, and council district.
+## Data Access — DuckDB
 
-You can discuss:
-- How to use Austin 311 (call 3-1-1, web at 311.austin.gov, mobile app)
-- Common request types and response times
-- Data trends and statistics
-- How to access the public dataset via Socrata API
+All 311 data is stored in a local DuckDB database at: {DUCKDB_PATH}
+Table name: `service_requests`
 
-You have a local CSV file at {CSV_PATH} containing 311 service requests from January of last year to present, updated incrementally on each startup. Use the Read tool to access this file when users ask about recent 311 data. The CSV columns are: sr_number, sr_type_desc, sr_department_desc, sr_method_received_desc, sr_status_desc, sr_status_date, sr_created_date, sr_updated_date, sr_closed_date, sr_location, sr_location_street_number, sr_location_street_name, sr_location_city, sr_location_zip_code, sr_location_county, sr_location_x, sr_location_y, sr_location_lat, sr_location_long, sr_location_lat_long, sr_location_council_district, sr_location_map_page, sr_location_map_tile.
+Columns:
+- sr_number — unique service request ID
+- sr_type_desc — request category (e.g. "ARR - Garbage", "TPW - Pothole Repair")
+- sr_department_desc — department (e.g. "Austin Resource Recovery", "Transportation & Public Works")
+- sr_method_received_desc — how received (Phone, Web, Mobile App, etc.)
+- sr_status_desc — status (Open, Closed, Duplicate, etc.)
+- sr_status_date — date of last status change
+- sr_created_date — date request was created
+- sr_updated_date — date request was last updated
+- sr_closed_date — date request was closed
+- sr_location — full address
+- sr_location_street_number — street number
+- sr_location_street_name — street name
+- sr_location_city — city
+- sr_location_zip_code — ZIP code
+- sr_location_county — county
+- sr_location_x — X coordinate
+- sr_location_y — Y coordinate
+- sr_location_lat — latitude
+- sr_location_long — longitude
+- sr_location_lat_long — combined lat/long
+- sr_location_council_district — council district number (1-10)
+- sr_location_map_page — map page reference
+- sr_location_map_tile — map tile reference
 
-For older data or complex queries, use the Socrata API: https://data.austintexas.gov/resource/xwdj-i9he.csv (or .json). Use $where, $limit, $order, $select, $group parameters.
+**ALWAYS use DuckDB for data analysis.** Write Python scripts that query DuckDB directly:
+```python
+import duckdb
+con = duckdb.connect('{DUCKDB_PATH}')
+df = con.execute("SELECT ... FROM service_requests ...").fetchdf()
+con.close()
+```
+`fetchdf()` returns a pandas DataFrame — use it directly with plotly for charts.
+
+**If the database doesn't exist or is empty**, tell the user you need to download data first and offer to run the download-311-data skill.
+
+For data not in the local database, use the Socrata API: https://data.austintexas.gov/resource/xwdj-i9he.csv (or .json). Use $where, $limit, $order, $select, $group parameters.
 
 CRITICAL — CHART WORKFLOW (you MUST follow these steps exactly):
-1. Write a Python script to /tmp that uses pandas + plotly to analyze data and generate a chart
+1. Write a Python script to /tmp that uses duckdb + plotly to query data and generate a chart
 2. The script must call fig.write_html('/tmp/chart_output.html', include_plotlyjs='cdn')
 3. Run the script with Bash
 4. Read the HTML file content from /tmp/chart_output.html

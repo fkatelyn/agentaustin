@@ -6,43 +6,52 @@ description: >
   or any request that involves producing a standalone HTML report, PNG chart, or CSV export
   from 311 data. This skill uses the save_report MCP tool to write files to the reports
   directory so they appear in the sidebar file tree.
-version: 2.0.0
+version: 3.0.0
 ---
 
-# Create Report
+# Create Report (DuckDB)
 
-Generate self-contained reports from Austin 311 data using **pandas + plotly** and save them using the `save_report` MCP tool. Reports appear in the sidebar file tree for easy access.
+Generate self-contained reports from Austin 311 data using **DuckDB + plotly** and save them using the `save_report` MCP tool. Reports appear in the sidebar file tree for easy access.
 
 ## Important Rules
 
 1. **Always use `save_report`** to write report files. Do NOT use Write, Bash, or any other tool to create report files.
 2. **Filename convention:** `<topic>-report-<YYYY-MM-DD>.html` for HTML reports, `<topic>-chart-<YYYY-MM-DD>.png` for PNG charts, `<topic>-data-<YYYY-MM-DD>.csv` for CSV exports.
 3. **Sanitize filenames:** Use lowercase, hyphens instead of spaces, no special characters.
-4. **Pure Python.** Use pandas for data manipulation and plotly for charts. No HTML/JS string templating for charts.
+4. **Use DuckDB for all queries.** Query DuckDB directly, use `fetchdf()` to get pandas DataFrames for plotly.
+
+## DuckDB Path
+
+```bash
+DATA_DIR="${RAILWAY_VOLUME_MOUNT_PATH:-$(cd "$(dirname "$(find . -name pyproject.toml -maxdepth 1)")" && pwd)/data}"
+DUCKDB_PATH="$DATA_DIR/311.duckdb"
+```
 
 ## Report Types
 
 ### HTML Reports (Primary)
 
 Build a Python script that:
-1. Analyzes data with pandas
-2. Creates plotly charts
+1. Queries DuckDB for aggregations
+2. Creates plotly charts from the result DataFrames
 3. Wraps everything in an HTML template with metric cards, tables, and takeaways
-
-The report HTML combines plotly chart divs (from `fig.to_html(full_html=False, include_plotlyjs=False)`) with custom HTML sections for metrics, tables, and narrative.
 
 #### Python Template
 
 ```python
-import pandas as pd
+import duckdb
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-df = pd.read_csv("<CSV_PATH>")
+DUCKDB_PATH = '<DUCKDB_PATH>'  # substitute actual path
+con = duckdb.connect(DUCKDB_PATH)
 
-# --- Compute statistics ---
-total = len(df)
-# ... more aggregations ...
+# --- Query data ---
+total = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+df_types = con.execute("""
+    SELECT sr_type_desc, COUNT(*) as cnt
+    FROM service_requests GROUP BY sr_type_desc ORDER BY cnt DESC LIMIT 10
+""").fetchdf()
 
 # --- Build plotly charts ---
 fig = make_subplots(rows=1, cols=2, ...)
@@ -58,6 +67,8 @@ fig.update_layout(
 
 # Get chart HTML (div only, no full page)
 chart_div = fig.to_html(full_html=False, include_plotlyjs=False)
+
+con.close()
 
 # --- Build report HTML ---
 html = f"""<!DOCTYPE html>
@@ -111,13 +122,13 @@ html = f"""<!DOCTYPE html>
 <body>
   <div class="report">
     <h1>REPORT TITLE</h1>
-    <p class="subtitle">Austin 311 · Date Range · {{total}} records</p>
+    <p class="subtitle">Austin 311 · Date Range · {total:,} records</p>
     <div class="summary">Executive summary goes here.</div>
     <div class="metrics">
-      <div class="metric-card"><div class="value">{{total:,}}</div><div class="label">Total Requests</div></div>
+      <div class="metric-card"><div class="value">{total:,}</div><div class="label">Total Requests</div></div>
     </div>
     <div class="chart-section">
-      {{chart_div}}
+      {chart_div}
     </div>
     <div class="takeaways">
       <h2>Key Takeaways</h2>
@@ -138,7 +149,12 @@ Then save via `save_report` and tell the user to check the sidebar.
 For standalone chart images, use plotly with kaleido:
 
 ```python
+import duckdb
 import plotly.graph_objects as go
+
+con = duckdb.connect('<DUCKDB_PATH>')
+df = con.execute("SELECT ... FROM service_requests ...").fetchdf()
+con.close()
 
 fig = go.Figure(...)
 fig.update_layout(template='plotly_dark', paper_bgcolor='#1a1a2e', plot_bgcolor='#16213e')
@@ -155,16 +171,19 @@ Call `save_report(filename="...", content=b64, encoding="base64")`
 
 ### CSV Exports
 
-For raw data dumps:
-
-1. Generate CSV content as a string
-2. Call `save_report(filename="...", content="col1,col2\nval1,val2\n...")`
+```python
+import duckdb
+con = duckdb.connect('<DUCKDB_PATH>')
+csv_content = con.execute("SELECT ... FROM service_requests ...").fetchdf().to_csv(index=False)
+con.close()
+```
+Call `save_report(filename="...", content=csv_content)`
 
 ## Workflow
 
-1. Read and analyze the data (use the CSV path from system prompt, or Socrata API for historical data)
-2. Compute aggregations and statistics using pandas
-3. Build plotly charts and wrap in report HTML
+1. Query DuckDB for aggregations and statistics
+2. Build plotly charts from DataFrames
+3. Wrap in report HTML template
 4. Write to `/tmp/` as intermediate, then call `save_report` to persist
 5. Summarize key findings in your chat response
 6. Tell the user to check the file tree in the sidebar for the full report
