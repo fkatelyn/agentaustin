@@ -1,6 +1,6 @@
 # Architecture
 
-agent311 is a full-stack app: a FastAPI backend that runs a Claude AI agent, and a Next.js frontend for the chat UI.
+Agent Austin is a full-stack app: a FastAPI backend that runs a Claude AI agent, and a Next.js frontend for the chat UI.
 
 ## Stack
 
@@ -19,42 +19,29 @@ agent311 is a full-stack app: a FastAPI backend that runs a Claude AI agent, and
 
 The backend exposes a `/api/chat` endpoint that streams AI responses using Server-Sent Events (SSE) in Vercel AI SDK v6 format. The frontend connects via JWT-authenticated requests and renders responses with live markdown streaming.
 
-Tool invocations are emitted as `text-delta` markers: `[Using tool: Read]`, `[Using tool: view_content /tmp/file.html]`. The `view_content` MCP tool lets the agent expose a file for frontend preview (restricted to `/tmp/`, max 200KB, `.html`/`.js`/`.jsx`/`.tsx` only).
+Tool invocations are emitted as `text-delta` markers: `[Using tool: Read]`, `[Using tool: view_content /path/to/file.html]`.
+
+### MCP Tools
+
+The agent has three custom MCP tools:
+
+- **`view_content`** — Exposes a file for frontend preview in the artifact panel. Restricted to `/tmp/` and the persistent volume mount, max 200KB, allowed extensions: `.html`, `.js`, `.jsx`, `.tsx`, `.png`, `.csv`.
+- **`save_chart`** — Saves an agent-generated chart (HTML or PNG) to `<volume>/analysis/charts/`. Returns the saved path for use with `view_content`.
+- **`save_report`** — Saves a report (HTML, PNG, CSV, PDF) to `<volume>/reports/`. Returns the saved path for use with `view_content`.
 
 ## Project Structure
 
 ```
-agent311/
-├── agent311/              # Backend Python package
-│   ├── agent311/
-│   │   ├── main.py        # FastAPI app, all endpoints, SSE streaming, MCP tools
-│   │   ├── db.py          # SQLAlchemy async ORM, Session/Message models
-│   │   └── auth.py        # JWT authentication
-│   ├── .claude/
-│   │   └── skills/        # Claude Code skills (download-311-data, analyze-311-data, visualize, etc.)
-│   ├── pyproject.toml     # Python dependencies (uv)
-│   ├── railpack.json      # Railway build config
-│   ├── railway.json       # Railway builder config
-│   └── start.sh           # Startup: download 311 data → start uvicorn
-├── agentui/               # Next.js frontend
-│   ├── app/
-│   │   ├── page.tsx       # Chat page
-│   │   └── login/         # Login page
-│   ├── components/
-│   │   ├── chat.tsx           # Main orchestrator (SSE, state, layout)
-│   │   ├── chat-messages.tsx  # Message rendering + tool summary + artifact cards
-│   │   ├── sidebar.tsx        # Session list, favorites, delete
-│   │   ├── artifact-panel.tsx # Preview panel (iframe/JSX + resizable)
-│   │   ├── chat-input.tsx     # PromptInput wrapper
-│   │   └── ai-elements/       # AI Elements components (Message, PromptInput, etc.)
-│   ├── lib/
-│   │   ├── session-api.ts     # Backend session CRUD API calls
-│   │   ├── auth.ts            # JWT login + authFetch wrapper
-│   │   ├── config.ts          # API_URL config
-│   │   └── types.ts           # ChatMessage type
-│   ├── railpack.json          # Railway build config
-│   └── package.json
-└── docs/
+agentaustin/
+├── agent311/                  # Backend
+│   ├── agent311/              # Python package
+│   ├── .claude/skills/        # Agent skills (download, analyze, visualize, etc.)
+│   └── data/                  # Downloaded data, charts, and reports (gitignored)
+├── agentui/                   # Frontend
+│   ├── app/                   # Pages
+│   ├── components/            # React components
+│   └── lib/                   # API clients and utilities
+└── docs/                      # Documentation
 ```
 
 ## API Endpoints
@@ -68,7 +55,13 @@ agent311/
 | `GET` | `/api/sessions/{id}` | Get session with messages |
 | `PATCH` | `/api/sessions/{id}` | Update title or favorite |
 | `DELETE` | `/api/sessions/{id}` | Delete session |
-| `GET` | `/api/fetch_file` | Fetch file for preview (restricted to `/tmp/`) |
+| `PATCH` | `/api/messages/{id}` | Update a message |
+| `GET` | `/api/reports` | List report files |
+| `GET` | `/api/reports/download` | Download a report file |
+| `POST` | `/api/reports/upload` | Upload a report file |
+| `PATCH` | `/api/reports/{filename}` | Rename a report file |
+| `DELETE` | `/api/reports/{filename}` | Delete a report file |
+| `GET` | `/api/fetch_file` | Fetch file for preview |
 
 ### `POST /api/chat`
 
@@ -96,7 +89,7 @@ Data comes from the **City of Austin Open Data Portal** via Socrata.
 
 - **Dataset:** [311 Unified Data](https://data.austintexas.gov/City-Government/311-Unified-Data/i26j-ai4z)
 - **API Endpoint:** `https://data.austintexas.gov/resource/xwdj-i9he.csv`
-- **Size:** ~7.8M rows (2014–present, updated daily)
+- **Size:** ~2.4M rows (2014–present, updated daily)
 - **No API key required** for reasonable request volumes
 
 ### Schema

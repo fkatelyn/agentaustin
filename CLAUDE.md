@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-agent311 is an Austin 311 Data Science Agent — a full-stack application with a FastAPI backend and Next.js frontend, designed to interact with Austin 311 service request data using AI capabilities.
+Agent Austin is an AI-powered data science agent for Austin 311 service request data — a full-stack application with a FastAPI backend and Next.js frontend.
 
 ## Tech Stack
 

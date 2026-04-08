@@ -1,5 +1,3 @@
-**This repo is deprecated and replaced with [fkatelyn/agentaustin](https://github.com/fkatelyn/agentaustin).**
-
 # Agent Austin
 
 An AI-powered data science agent for Austin 311 service request data. Powered by Claude, Anthropic's LLM, it analyzes, visualizes, and summarizes city service data — just ask in plain English.
@@ -62,11 +60,60 @@ Open http://localhost:3000.
 
 ## What is Austin 311?
 
-Austin 311 is the City of Austin's non-emergency service request system. Residents use it to report issues like potholes, illegal dumping, stray animals, missed trash pickups, and more. The dataset goes back to 2014 and is updated daily — about 7.8 million records total.
+Austin 311 is the City of Austin's non-emergency service request system. Residents use it to report issues like potholes, illegal dumping, stray animals, missed trash pickups, and more. The dataset goes back to 2014 and is updated daily — about 2.4 million records total.
 
 - **Phone:** 3-1-1 (or 512-974-2000 from outside Austin)
 - **Web:** https://311.austin.gov
 - **App:** Austin 311 (iOS/Android)
+
+## Directory Layout
+
+```
+agentaustin/
+├── agent311/                  # Backend
+│   ├── agent311/              # Python package
+│   ├── .claude/skills/        # Agent skills (download, analyze, visualize, etc.)
+│   └── data/                  # Downloaded data, charts, and reports (gitignored)
+├── agentui/                   # Frontend
+│   ├── app/                   # Pages
+│   ├── components/            # React components
+│   └── lib/                   # API clients and utilities
+└── docs/                      # Documentation
+```
+
+**Data storage:** The `agent311/data/` directory holds all downloaded 311 CSV data, generated charts, and saved reports. On Railway, this maps to a persistent volume (`RAILWAY_VOLUME_MOUNT_PATH`). Locally it lives at `agent311/data/`. This directory is gitignored — data files are never committed.
+
+## Data Analysis Example: Potholes
+
+Here's a walkthrough of how to use the agent to analyze pothole complaints in Austin.
+
+**1. Download the data**
+> "Download 311 data"
+
+This fetches year-to-date service requests from the City of Austin Open Data Portal and saves them to `agent311/data/311_recent.csv`.
+
+**2. Ask about potholes**
+> "How many pothole complaints were filed this year?"
+> "What's the average resolution time for potholes?"
+> "Which ZIP codes have the most pothole reports?"
+
+**3. Visualize trends**
+> "Show me a monthly trend of pothole complaints"
+> "Make a bar chart of potholes by council district"
+
+The agent generates interactive Plotly charts and saves them to `agent311/data/analysis/charts/`.
+
+**4. Generate a report**
+> "Create a pothole analysis report"
+
+The agent produces an HTML report with charts, tables, and summary statistics, saved to `agent311/data/reports/`. Reports are accessible from the sidebar in the web UI.
+
+**5. Compare and dig deeper**
+> "Compare pothole resolution rates across departments"
+> "Are pothole complaints increasing or decreasing year over year?"
+> "What percentage of pothole requests are still open?"
+
+All generated files (CSVs, charts, reports) are stored under `agent311/data/` and persist across server restarts on Railway.
 
 ## Documentation
 
@@ -75,6 +122,3 @@ Austin 311 is the City of Austin's non-emergency service request system. Residen
 - **[Backend Guide](docs/agent-sdk-guide.md)** — SDK integration, skills, custom MCP tools
 - **[Railway Deployment Guide](docs/railway-deployment-guide.md)** — Full deployment instructions
 
-## License
-
-GPL-3.0
