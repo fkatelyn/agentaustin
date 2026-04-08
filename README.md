@@ -1,3 +1,5 @@
+**This repo is deprecated and replaced with [fkatelyn/agentaustin](https://github.com/fkatelyn/agentaustin).**
+
 # Agent Austin
 
 An AI-powered data science agent for Austin 311 service request data. Powered by Claude, Anthropic's LLM, it analyzes, visualizes, and summarizes city service data — just ask in plain English.
