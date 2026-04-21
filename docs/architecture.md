@@ -2,7 +2,7 @@
 
 Agent Austin is a full-stack app: a FastAPI backend that runs a Claude AI agent, and a Next.js frontend for the chat UI.
 
-> **See also:** [architecture/](architecture/README.md) for Mermaid diagrams (system, sequence, deployment, data pipeline, auth).
+> **See also:** [architecture/](architecture/README.md) for the system diagram and agent skills reference.
 
 ## Stack
 
