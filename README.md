@@ -90,7 +90,7 @@ Here's a walkthrough of how to use the agent to analyze pothole complaints in Au
 **1. Download the data**
 > "Download 311 data"
 
-This fetches year-to-date service requests from the City of Austin Open Data Portal and saves them to `agent311/data/311_recent.csv`.
+This refreshes the local DuckDB at `agent311/data/311.duckdb` with the latest service requests from the City of Austin Open Data Portal. (`start.sh` seeds the last 7 days on first boot; the FastAPI lifespan async task catches up forward and extends history backward every 24h.)
 
 **2. Ask about potholes**
 > "How many pothole complaints were filed this year?"

@@ -39,7 +39,8 @@ graph TB
     SDK -->|streaming| Anthropic
     FastAPI <-->|async SQLAlchemy| PG
     MCP <-->|view/save files| VOL
-    FastAPI -->|start.sh<br/>delta merge| Socrata
+    FastAPI -->|lifespan async task<br/>catch-up + history every 24h| Socrata
+    FastAPI -->|start.sh seeds<br/>last 7 days if empty| Socrata
     Socrata --> VOL
 ```
 
@@ -51,13 +52,13 @@ The Claude agent running inside the backend has access to **skills** — structu
 
 ### download-311-data
 
-Downloads City of Austin 311 service request data from the Socrata Open Data API (`data.austintexas.gov`). Supports full downloads and incremental delta merges — if `311_recent.csv` already exists, it fetches only rows newer than the latest timestamp and deduplicates by `sr_number`. Handles pagination for datasets exceeding the 100k row API limit. Default range: January 1 of last year to present.
+Downloads City of Austin 311 service request data from the Socrata Open Data API (`data.austintexas.gov`) into the local DuckDB. Supports full downloads and incremental delta merges — fetches only rows newer than `MAX(sr_created_date)` and deduplicates by `sr_number`. Handles pagination for datasets exceeding the 100k row API limit. The boot script seeds the last 7 days; the lifespan async task in `main.py` extends both directions every 24h.
 
 **Triggers:** "download 311 data", "refresh 311 data", "update 311 data", "fetch Austin 311"
 
 ### analyze-311-data
 
-Runs exploratory analysis on the local 311 CSV and presents findings with text summaries. Covers top request types, department breakdown, status distribution, reporting method, temporal patterns (day-of-week, hour-of-day), busiest/quietest days, top ZIP codes, council districts, resolution times by category, open request backlogs, and oldest still-open requests. Includes a 7-day ASCII bar chart.
+Runs exploratory analysis on the local 311 DuckDB and presents findings with text summaries. Covers top request types, department breakdown, status distribution, reporting method, temporal patterns (day-of-week, hour-of-day), busiest/quietest days, top ZIP codes, council districts, resolution times by category, open request backlogs, and oldest still-open requests. Includes a 7-day ASCII bar chart.
 
 **Triggers:** "analyze 311 data", "311 insights", "311 statistics", "311 trends", "what's interesting in 311"
 

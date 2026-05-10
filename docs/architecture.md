@@ -87,12 +87,21 @@ data: [DONE]
 
 ## Austin 311 Dataset
 
-Data comes from the **City of Austin Open Data Portal** via Socrata.
+Data comes from the **City of Austin Open Data Portal** via Socrata, stored locally in **DuckDB**.
 
 - **Dataset:** [311 Unified Data](https://data.austintexas.gov/City-Government/311-Unified-Data/i26j-ai4z)
 - **API Endpoint:** `https://data.austintexas.gov/resource/xwdj-i9he.csv`
-- **Size:** ~2.4M rows (2014–present, updated daily)
+- **Local store:** DuckDB file at `<volume>/311.duckdb`, table `service_requests`, unique index on `sr_number`
+- **Size:** ~7.8M rows (2014–present, ~1,500–2,000 new rows daily)
 - **No API key required** for reasonable request volumes
+
+### Refresh model
+
+- **Boot seed (`start.sh`):** if the DuckDB is empty, downloads the last 7 days. Boots in seconds.
+- **Lifespan async task (`main.py`):** at startup and every 24h, runs two phases:
+  1. **Catch up forward** from `MAX(sr_created_date)` — daily delta.
+  2. **Extend history backward** from `MIN(sr_created_date)` toward `2014-01-01`.
+- All inserts dedupe by `sr_number`. No cron, no separate process.
 
 ### Schema
 
