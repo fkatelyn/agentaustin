@@ -50,6 +50,7 @@ DUCKDB_PATH = Path(_volume_mount) / "311.duckdb"
 REPORTS_DIR = Path(_volume_mount) / "reports"
 CHARTS_DIR = Path(_volume_mount) / "analysis" / "charts"
 REFRESH_INTERVAL_SECS = int(os.environ.get("REFRESH_INTERVAL_SECS", str(24 * 60 * 60)))
+INITIAL_WINDOW_DAYS = int(os.environ.get("INITIAL_WINDOW_DAYS", "7"))
 SOCRATA_CSV = "https://data.austintexas.gov/resource/xwdj-i9he.csv"
 HISTORY_FLOOR = "2014-01-01T00:00:00"
 
@@ -89,80 +90,141 @@ def _insert_page(con) -> tuple[int, int]:
     return page_rows, after - before
 
 
-def _refresh_311_data() -> dict:
-    """Catch up recent rows, then extend history backward toward 2014."""
-    import time
+def _ensure_table(con) -> None:
+    """Create the service_requests table + sr_number index if they don't exist."""
+    con.execute(
+        f"CREATE TABLE IF NOT EXISTS service_requests AS "
+        f"SELECT * FROM read_csv_auto('{SOCRATA_CSV}?$limit=1', all_varchar=true) WHERE 1=0"
+    )
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sr_number ON service_requests(sr_number)"
+    )
 
-    import duckdb
+
+def _do_catchup(con) -> int:
+    """Phase 1 — catch up forward from MAX(sr_created_date).
+
+    On an empty DB, falls back to fetching the last INITIAL_WINDOW_DAYS days so
+    the table self-bootstraps without help from start.sh.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    row = con.execute("SELECT MAX(sr_created_date) FROM service_requests").fetchone()
+    if row and row[0]:
+        watermark = str(row[0])[:19]
+    else:
+        watermark = (
+            datetime.now(timezone.utc) - timedelta(days=INITIAL_WINDOW_DAYS)
+        ).strftime("%Y-%m-%dT%H:%M:%S")
+        logger.info("[refresh] empty DB — bootstrapping from %s", watermark)
+
+    added = 0
+    while True:
+        _fetch_page(f"sr_created_date >= '{watermark}'", "sr_created_date")
+        page_rows, page_added = _insert_page(con)
+        added += page_added
+        if page_rows == 0:
+            break
+        new_max = con.execute(
+            "SELECT MAX(sr_created_date) FROM service_requests"
+        ).fetchone()[0]
+        new_watermark = str(new_max)[:19] if new_max else watermark
+        if page_rows < 100_000 or new_watermark == watermark:
+            break
+        watermark = new_watermark
+    return added
+
+
+def _do_history(con) -> int:
+    """Phase 2 — extend history backward toward HISTORY_FLOOR. No-op once full."""
+    row = con.execute("SELECT MIN(sr_created_date) FROM service_requests").fetchone()
+    if not (row and row[0]):
+        return 0
+    floor = str(row[0])[:19]
+    added = 0
+    while floor > HISTORY_FLOOR:
+        _fetch_page(f"sr_created_date < '{floor}'", "sr_created_date DESC")
+        page_rows, page_added = _insert_page(con)
+        added += page_added
+        if page_rows == 0:
+            break
+        new_min = con.execute(
+            "SELECT MIN(sr_created_date) FROM service_requests"
+        ).fetchone()[0]
+        new_floor = str(new_min)[:19] if new_min else floor
+        if page_rows < 100_000 or new_floor == floor:
+            break
+        floor = new_floor
+    return added
+
+
+def _stats(con) -> dict:
+    total = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+    rng = con.execute(
+        "SELECT MIN(sr_created_date), MAX(sr_created_date) FROM service_requests"
+    ).fetchone()
+    return {
+        "total": total,
+        "min_date": str(rng[0])[:10] if rng and rng[0] else None,
+        "max_date": str(rng[1])[:10] if rng and rng[1] else None,
+    }
+
+
+def _bootstrap_window() -> dict:
+    """Run Phase 1 only — blocks the lifespan startup until the DB has data.
+
+    On a fresh container this loads the last INITIAL_WINDOW_DAYS days
+    (~5–10 seconds). On a warm container with up-to-date data, it's a cheap
+    no-op. Safe to call repeatedly.
+    """
+    import time
 
     started = time.time()
     DUCKDB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(str(DUCKDB_PATH))
+    con = duckdb_connect_writer()
     try:
-        con.execute(
-            f"CREATE TABLE IF NOT EXISTS service_requests AS "
-            f"SELECT * FROM read_csv_auto('{SOCRATA_CSV}?$limit=1', all_varchar=true) WHERE 1=0"
-        )
-        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sr_number ON service_requests(sr_number)")
-
-        # Phase 1 — catch up forward from MAX(sr_created_date)
-        recent_added = 0
-        row = con.execute("SELECT MAX(sr_created_date) FROM service_requests").fetchone()
-        if row and row[0]:
-            watermark = str(row[0])[:19]
-            while True:
-                _fetch_page(f"sr_created_date >= '{watermark}'", "sr_created_date")
-                page_rows, added = _insert_page(con)
-                recent_added += added
-                if page_rows == 0:
-                    break
-                new_max = con.execute(
-                    "SELECT MAX(sr_created_date) FROM service_requests"
-                ).fetchone()[0]
-                new_watermark = str(new_max)[:19] if new_max else watermark
-                if page_rows < 100_000 or new_watermark == watermark:
-                    break
-                watermark = new_watermark
-
-        # Phase 2 — extend history backward from MIN(sr_created_date) toward 2014
-        history_added = 0
-        row = con.execute("SELECT MIN(sr_created_date) FROM service_requests").fetchone()
-        if row and row[0]:
-            floor = str(row[0])[:19]
-            while floor > HISTORY_FLOOR:
-                _fetch_page(f"sr_created_date < '{floor}'", "sr_created_date DESC")
-                page_rows, added = _insert_page(con)
-                history_added += added
-                if page_rows == 0:
-                    break
-                new_min = con.execute(
-                    "SELECT MIN(sr_created_date) FROM service_requests"
-                ).fetchone()[0]
-                new_floor = str(new_min)[:19] if new_min else floor
-                if page_rows < 100_000 or new_floor == floor:
-                    break
-                floor = new_floor
-
-        total = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
-        date_range = con.execute(
-            "SELECT MIN(sr_created_date), MAX(sr_created_date) FROM service_requests"
-        ).fetchone()
+        _ensure_table(con)
+        added = _do_catchup(con)
+        stats = _stats(con)
     finally:
         con.close()
+    return {"phase": "bootstrap", "added": added, **stats, "elapsed_secs": round(time.time() - started, 1)}
 
+
+def _refresh_311_data() -> dict:
+    """Full refresh — Phase 1 (catch-up) + Phase 2 (history). Called by the background loop."""
+    import time
+
+    started = time.time()
+    DUCKDB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb_connect_writer()
+    try:
+        _ensure_table(con)
+        recent_added = _do_catchup(con)
+        history_added = _do_history(con)
+        stats = _stats(con)
+    finally:
+        con.close()
     return {
+        "phase": "full",
         "recent_added": recent_added,
         "history_added": history_added,
-        "total": total,
-        "min_date": str(date_range[0])[:10] if date_range and date_range[0] else None,
-        "max_date": str(date_range[1])[:10] if date_range and date_range[1] else None,
+        **stats,
         "elapsed_secs": round(time.time() - started, 1),
     }
 
 
+def duckdb_connect_writer():
+    """Open the DuckDB file in read-write mode. Only the refresh thread does this."""
+    import duckdb
+
+    return duckdb.connect(str(DUCKDB_PATH))
+
+
 async def _refresh_loop() -> None:
-    """Run a refresh at startup, then every REFRESH_INTERVAL_SECS forever."""
+    """Sleep first (bootstrap already ran), then full refresh on every interval."""
     while True:
+        await asyncio.sleep(REFRESH_INTERVAL_SECS)
         try:
             result = await asyncio.to_thread(_refresh_311_data)
             logger.info("[refresh] %s", result)
@@ -170,7 +232,6 @@ async def _refresh_loop() -> None:
             raise
         except Exception:
             logger.exception("[refresh] cycle failed")
-        await asyncio.sleep(REFRESH_INTERVAL_SECS)
 
 
 @asynccontextmanager
@@ -181,6 +242,18 @@ async def lifespan(app: FastAPI):
     logger.info(f"Reports directory ready: {REPORTS_DIR}")
     CHARTS_DIR.mkdir(parents=True, exist_ok=True)
     logger.info(f"Charts directory ready: {CHARTS_DIR}")
+
+    # Synchronous bootstrap: block until the DB has at least the initial window
+    # of data. Phase 2 (history backfill) runs in the background after yield.
+    try:
+        result = await asyncio.to_thread(_bootstrap_window)
+        logger.info("[refresh] initial bootstrap: %s", result)
+    except Exception:
+        logger.exception(
+            "[refresh] initial bootstrap failed — continuing; the background "
+            "loop will retry on its first cycle"
+        )
+
     refresh_task = asyncio.create_task(_refresh_loop())
     logger.info("[refresh] background task started (interval=%ss)", REFRESH_INTERVAL_SECS)
     try:
@@ -244,16 +317,20 @@ Columns:
 - sr_location_map_page — map page reference
 - sr_location_map_tile — map tile reference
 
-**ALWAYS use DuckDB for data analysis.** Write Python scripts that query DuckDB directly:
+**ALWAYS use DuckDB for data analysis.** Write Python scripts that query DuckDB **in read-only mode** so they coexist with the background refresh thread:
 ```python
 import duckdb
-con = duckdb.connect('{DUCKDB_PATH}')
+con = duckdb.connect('{DUCKDB_PATH}', read_only=True)
 df = con.execute("SELECT ... FROM service_requests ...").fetchdf()
 con.close()
 ```
 `fetchdf()` returns a pandas DataFrame — use it directly with plotly for charts.
 
-**If the database doesn't exist or is empty**, tell the user you need to download data first and offer to run the download-311-data skill.
+**Data may still be loading.** The table is bootstrapped to the last {INITIAL_WINDOW_DAYS} days on container startup, then backfilled toward 2014 in the background over ~1-2 hours. For any question that spans more than a week of history, **first check the available range** with:
+```python
+con.execute("SELECT count(*), MIN(sr_created_date), MAX(sr_created_date) FROM service_requests").fetchone()
+```
+If the row count is low or `MIN(sr_created_date)` is recent, tell the user historical backfill is still in progress and answer with the available window.
 
 For data not in the local database, use the Socrata API: https://data.austintexas.gov/resource/xwdj-i9he.csv (or .json). Use $where, $limit, $order, $select, $group parameters.
 
@@ -624,6 +701,40 @@ async def login(body: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     token = create_token(body.email)
     return {"token": token}
+
+
+# ─── Data status endpoint ───────────────────────────────────────────────────
+
+
+@app.get("/api/data/status")
+async def data_status(user: str = Depends(get_current_user)):
+    """Row count + date range for the 311 DuckDB. Lets the UI show loading state."""
+    import duckdb
+
+    def _stat() -> dict:
+        if not DUCKDB_PATH.exists():
+            return {"rows": 0, "min_date": None, "max_date": None, "ready": False}
+        try:
+            con = duckdb.connect(str(DUCKDB_PATH), read_only=True)
+        except Exception:
+            return {"rows": 0, "min_date": None, "max_date": None, "ready": False}
+        try:
+            row = con.execute(
+                "SELECT count(*), MIN(sr_created_date), MAX(sr_created_date) "
+                "FROM service_requests"
+            ).fetchone()
+            return {
+                "rows": row[0],
+                "min_date": str(row[1])[:10] if row[1] else None,
+                "max_date": str(row[2])[:10] if row[2] else None,
+                "ready": row[0] > 0,
+            }
+        except duckdb.CatalogException:
+            return {"rows": 0, "min_date": None, "max_date": None, "ready": False}
+        finally:
+            con.close()
+
+    return await asyncio.to_thread(_stat)
 
 
 # ─── Session CRUD endpoints ─────────────────────────────────────────────────
