@@ -51,13 +51,47 @@ REPORTS_DIR = Path(_volume_mount) / "reports"
 CHARTS_DIR = Path(_volume_mount) / "analysis" / "charts"
 REFRESH_INTERVAL_SECS = int(os.environ.get("REFRESH_INTERVAL_SECS", str(24 * 60 * 60)))
 SOCRATA_CSV = "https://data.austintexas.gov/resource/xwdj-i9he.csv"
+HISTORY_FLOOR = "2014-01-01T00:00:00"
+
+
+def _fetch_page(where: str, order: str) -> int:
+    """Fetch one Socrata page into /tmp/311_page.csv. Returns size in bytes."""
+    import urllib.parse
+    import urllib.request
+
+    url = (
+        f"{SOCRATA_CSV}?"
+        f"$where={urllib.parse.quote(where)}"
+        f"&$order={urllib.parse.quote(order)}"
+        f"&$limit=100000"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "agent-austin/1.0"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        body = resp.read()
+    Path("/tmp/311_page.csv").write_bytes(body)
+    return len(body)
+
+
+def _insert_page(con) -> tuple[int, int]:
+    """Insert /tmp/311_page.csv, dedup by sr_number. Returns (rows_in_page, rows_added)."""
+    page_rows = con.execute(
+        "SELECT count(*) FROM read_csv_auto('/tmp/311_page.csv', all_varchar=true)"
+    ).fetchone()[0]
+    if page_rows == 0:
+        return 0, 0
+    before = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+    con.execute(
+        "INSERT INTO service_requests "
+        "SELECT * FROM read_csv_auto('/tmp/311_page.csv', all_varchar=true) src "
+        "WHERE NOT EXISTS (SELECT 1 FROM service_requests t WHERE t.sr_number = src.sr_number)"
+    )
+    after = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+    return page_rows, after - before
 
 
 def _refresh_311_data() -> dict:
-    """Fetch rows newer than MAX(sr_created_date) and upsert by sr_number."""
+    """Catch up recent rows, then extend history backward toward 2014."""
     import time
-    import urllib.parse
-    import urllib.request
 
     import duckdb
 
@@ -71,49 +105,59 @@ def _refresh_311_data() -> dict:
         )
         con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sr_number ON service_requests(sr_number)")
 
+        # Phase 1 — catch up forward from MAX(sr_created_date)
+        recent_added = 0
         row = con.execute("SELECT MAX(sr_created_date) FROM service_requests").fetchone()
-        if not (row and row[0]):
-            return {"skipped": "empty database — start.sh seeds the initial window"}
-        watermark = str(row[0])[:19]
+        if row and row[0]:
+            watermark = str(row[0])[:19]
+            while True:
+                _fetch_page(f"sr_created_date >= '{watermark}'", "sr_created_date")
+                page_rows, added = _insert_page(con)
+                recent_added += added
+                if page_rows == 0:
+                    break
+                new_max = con.execute(
+                    "SELECT MAX(sr_created_date) FROM service_requests"
+                ).fetchone()[0]
+                new_watermark = str(new_max)[:19] if new_max else watermark
+                if page_rows < 100_000 or new_watermark == watermark:
+                    break
+                watermark = new_watermark
 
-        added_total = 0
-        while True:
-            where_clause = f"sr_created_date >= '{watermark}'"
-            url = (
-                f"{SOCRATA_CSV}?"
-                f"$where={urllib.parse.quote(where_clause)}"
-                f"&$order=sr_created_date&$limit=100000"
-            )
-            req = urllib.request.Request(url, headers={"User-Agent": "agent-austin/1.0"})
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                Path("/tmp/311_page.csv").write_bytes(resp.read())
-
-            page_rows = con.execute(
-                "SELECT count(*) FROM read_csv_auto('/tmp/311_page.csv', all_varchar=true)"
-            ).fetchone()[0]
-            if page_rows == 0:
-                break
-
-            before = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
-            con.execute(
-                "INSERT INTO service_requests "
-                "SELECT * FROM read_csv_auto('/tmp/311_page.csv', all_varchar=true) src "
-                "WHERE NOT EXISTS (SELECT 1 FROM service_requests t WHERE t.sr_number = src.sr_number)"
-            )
-            after = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
-            added_total += after - before
-
-            new_max = con.execute("SELECT MAX(sr_created_date) FROM service_requests").fetchone()[0]
-            new_watermark = str(new_max)[:19] if new_max else watermark
-            if page_rows < 100_000 or new_watermark == watermark:
-                break
-            watermark = new_watermark
+        # Phase 2 — extend history backward from MIN(sr_created_date) toward 2014
+        history_added = 0
+        row = con.execute("SELECT MIN(sr_created_date) FROM service_requests").fetchone()
+        if row and row[0]:
+            floor = str(row[0])[:19]
+            while floor > HISTORY_FLOOR:
+                _fetch_page(f"sr_created_date < '{floor}'", "sr_created_date DESC")
+                page_rows, added = _insert_page(con)
+                history_added += added
+                if page_rows == 0:
+                    break
+                new_min = con.execute(
+                    "SELECT MIN(sr_created_date) FROM service_requests"
+                ).fetchone()[0]
+                new_floor = str(new_min)[:19] if new_min else floor
+                if page_rows < 100_000 or new_floor == floor:
+                    break
+                floor = new_floor
 
         total = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+        date_range = con.execute(
+            "SELECT MIN(sr_created_date), MAX(sr_created_date) FROM service_requests"
+        ).fetchone()
     finally:
         con.close()
 
-    return {"added": added_total, "total": total, "elapsed_secs": round(time.time() - started, 1)}
+    return {
+        "recent_added": recent_added,
+        "history_added": history_added,
+        "total": total,
+        "min_date": str(date_range[0])[:10] if date_range and date_range[0] else None,
+        "max_date": str(date_range[1])[:10] if date_range and date_range[1] else None,
+        "elapsed_secs": round(time.time() - started, 1),
+    }
 
 
 async def _refresh_loop() -> None:
