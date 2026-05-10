@@ -49,6 +49,84 @@ _volume_mount = os.environ.get(
 DUCKDB_PATH = Path(_volume_mount) / "311.duckdb"
 REPORTS_DIR = Path(_volume_mount) / "reports"
 CHARTS_DIR = Path(_volume_mount) / "analysis" / "charts"
+REFRESH_INTERVAL_SECS = int(os.environ.get("REFRESH_INTERVAL_SECS", str(24 * 60 * 60)))
+SOCRATA_CSV = "https://data.austintexas.gov/resource/xwdj-i9he.csv"
+
+
+def _refresh_311_data() -> dict:
+    """Fetch rows newer than MAX(sr_created_date) and upsert by sr_number."""
+    import time
+    import urllib.parse
+    import urllib.request
+
+    import duckdb
+
+    started = time.time()
+    DUCKDB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(str(DUCKDB_PATH))
+    try:
+        con.execute(
+            f"CREATE TABLE IF NOT EXISTS service_requests AS "
+            f"SELECT * FROM read_csv_auto('{SOCRATA_CSV}?$limit=1', all_varchar=true) WHERE 1=0"
+        )
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sr_number ON service_requests(sr_number)")
+
+        row = con.execute("SELECT MAX(sr_created_date) FROM service_requests").fetchone()
+        if not (row and row[0]):
+            return {"skipped": "empty database — start.sh seeds the initial window"}
+        watermark = str(row[0])[:19]
+
+        added_total = 0
+        while True:
+            where_clause = f"sr_created_date >= '{watermark}'"
+            url = (
+                f"{SOCRATA_CSV}?"
+                f"$where={urllib.parse.quote(where_clause)}"
+                f"&$order=sr_created_date&$limit=100000"
+            )
+            req = urllib.request.Request(url, headers={"User-Agent": "agent-austin/1.0"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                Path("/tmp/311_page.csv").write_bytes(resp.read())
+
+            page_rows = con.execute(
+                "SELECT count(*) FROM read_csv_auto('/tmp/311_page.csv', all_varchar=true)"
+            ).fetchone()[0]
+            if page_rows == 0:
+                break
+
+            before = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+            con.execute(
+                "INSERT INTO service_requests "
+                "SELECT * FROM read_csv_auto('/tmp/311_page.csv', all_varchar=true) src "
+                "WHERE NOT EXISTS (SELECT 1 FROM service_requests t WHERE t.sr_number = src.sr_number)"
+            )
+            after = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+            added_total += after - before
+
+            new_max = con.execute("SELECT MAX(sr_created_date) FROM service_requests").fetchone()[0]
+            new_watermark = str(new_max)[:19] if new_max else watermark
+            if page_rows < 100_000 or new_watermark == watermark:
+                break
+            watermark = new_watermark
+
+        total = con.execute("SELECT count(*) FROM service_requests").fetchone()[0]
+    finally:
+        con.close()
+
+    return {"added": added_total, "total": total, "elapsed_secs": round(time.time() - started, 1)}
+
+
+async def _refresh_loop() -> None:
+    """Run a refresh at startup, then every REFRESH_INTERVAL_SECS forever."""
+    while True:
+        try:
+            result = await asyncio.to_thread(_refresh_311_data)
+            logger.info("[refresh] %s", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[refresh] cycle failed")
+        await asyncio.sleep(REFRESH_INTERVAL_SECS)
 
 
 @asynccontextmanager
@@ -59,7 +137,16 @@ async def lifespan(app: FastAPI):
     logger.info(f"Reports directory ready: {REPORTS_DIR}")
     CHARTS_DIR.mkdir(parents=True, exist_ok=True)
     logger.info(f"Charts directory ready: {CHARTS_DIR}")
-    yield
+    refresh_task = asyncio.create_task(_refresh_loop())
+    logger.info("[refresh] background task started (interval=%ss)", REFRESH_INTERVAL_SECS)
+    try:
+        yield
+    finally:
+        refresh_task.cancel()
+        try:
+            await refresh_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 app = FastAPI(lifespan=lifespan)
