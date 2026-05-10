@@ -95,7 +95,7 @@ npm run start
 - `agent311/pyproject.toml` + `agent311/uv.lock` — Python dependencies
 - `agent311/railpack.json` — Backend Railway build config (system packages, Claude Code CLI install step)
 - `agent311/railway.json` — Specifies Railpack builder
-- `agent311/start.sh` — Startup script (downloads all 311 data into DuckDB if empty, starts uvicorn)
+- `agent311/start.sh` — Startup script (seeds DuckDB with last 7 days if empty, then starts uvicorn)
 - `agent311/.python-version` — Pins Python 3.12
 - `agent311/agent311/main.py` — FastAPI app, all endpoints, SSE streaming, MCP tools
 - `agent311/agent311/db.py` — SQLAlchemy async ORM, PostgreSQL config, Session/Message models
@@ -111,13 +111,19 @@ npm run start
 ## Data & Persistent Storage
 
 - **Volume mount:** `RAILWAY_VOLUME_MOUNT_PATH` on Railway; falls back to `data/` relative to `agent311/` locally
-- **DuckDB:** `<volume>/311.duckdb` — all 311 data (~7.8M rows from 2014-present), loaded via download-311-data skill
+- **DuckDB:** `<volume>/311.duckdb` — all 311 data (~7.8M rows from 2014-present), table `service_requests` with a unique index on `sr_number`
 - **Reports:** `<volume>/reports/` — user-curated HTML/CSV/PNG reports, shown in sidebar file tree
 - **Charts:** `<volume>/analysis/charts/` — agent-generated plotly charts, previewed in artifact panel
 - The `data/` directory is gitignored — generated data should never be committed
 - Data source: City of Austin Open Data (Socrata API), dataset ID `xwdj-i9he`
-- Data is NOT downloaded on startup — use the download-311-data skill to populate the DuckDB database
-- Updates use merge (staging table + sr_number dedup) to avoid duplicates
+
+### Refresh model
+
+- **Boot seed (`start.sh`):** if the DuckDB is missing or empty, downloads the last 7 days. Boots in seconds; the API is useful immediately.
+- **Lifespan async task (`main.py`):** runs at startup and every `REFRESH_INTERVAL_SECS` (default 24h). Each cycle does two phases:
+  1. **Catch up forward** from `MAX(sr_created_date)` — fast on day 2+, just the daily delta.
+  2. **Extend history backward** from `MIN(sr_created_date)` toward 2014-01-01 — pages until the floor; becomes a no-op once full history is loaded.
+- All inserts dedupe by `sr_number`, so re-runs are idempotent. No cron job, no separate refresh process.
 
 ## Environment Variables
 
