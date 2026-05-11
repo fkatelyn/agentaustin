@@ -75,19 +75,32 @@ def _fetch_page(where: str, order: str) -> int:
         f"&$limit={PAGE_SIZE}"
     )
     req = urllib.request.Request(url, headers={"User-Agent": "agent-austin/1.0"})
+    logger.debug("[refresh][fetch] GET %s", url)
     for attempt in range(FETCH_RETRIES + 1):
+        started = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
+                status = resp.status
                 body = resp.read()
             Path("/tmp/311_page.csv").write_bytes(body)
+            elapsed = time.monotonic() - started
+            logger.info(
+                "[refresh][fetch] %d %d bytes in %.2fs (where=%s, order=%s)",
+                status, len(body), elapsed, where, order,
+            )
             return len(body)
         except urllib.error.URLError as exc:
+            elapsed = time.monotonic() - started
             if attempt == FETCH_RETRIES:
+                logger.error(
+                    "[refresh][fetch] FAILED after %d attempts in %.2fs: %s (url=%s)",
+                    attempt + 1, elapsed, exc, url,
+                )
                 raise
             delay = 2 ** attempt
             logger.warning(
-                "[refresh] fetch failed (attempt %d/%d): %s — retrying in %ds",
-                attempt + 1, FETCH_RETRIES + 1, exc, delay,
+                "[refresh][fetch] failed (attempt %d/%d, %.2fs): %s — retrying in %ds (where=%s)",
+                attempt + 1, FETCH_RETRIES + 1, elapsed, exc, delay, where,
             )
             time.sleep(delay)
     return 0  # unreachable
@@ -112,13 +125,17 @@ def _insert_page(con) -> tuple[int, int]:
 
 def _ensure_table(con) -> None:
     """Create the service_requests table + sr_number index if they don't exist."""
+    schema_url = f"{SOCRATA_CSV}?$limit=1"
+    logger.info("[refresh][ensure_table] discovering schema from %s", schema_url)
     con.execute(
         f"CREATE TABLE IF NOT EXISTS service_requests AS "
-        f"SELECT * FROM read_csv_auto('{SOCRATA_CSV}?$limit=1', all_varchar=true) WHERE 1=0"
+        f"SELECT * FROM read_csv_auto('{schema_url}', all_varchar=true) WHERE 1=0"
     )
     con.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_sr_number ON service_requests(sr_number)"
     )
+    cols = con.execute("PRAGMA table_info('service_requests')").fetchall()
+    logger.info("[refresh][ensure_table] table ready with %d column(s)", len(cols))
 
 
 def _do_catchup(con) -> int:
@@ -127,54 +144,93 @@ def _do_catchup(con) -> int:
     On an empty DB, falls back to fetching the last INITIAL_WINDOW_DAYS days so
     the table self-bootstraps without help from start.sh.
     """
+    import time
     from datetime import datetime, timedelta, timezone
 
     row = con.execute("SELECT MAX(sr_created_date) FROM service_requests").fetchone()
     if row and row[0]:
         watermark = str(row[0])[:19]
+        logger.info("[refresh][catchup] starting from MAX(sr_created_date)=%s", watermark)
     else:
         watermark = (
             datetime.now(timezone.utc) - timedelta(days=INITIAL_WINDOW_DAYS)
         ).strftime("%Y-%m-%dT%H:%M:%S")
-        logger.info("[refresh] empty DB — bootstrapping from %s", watermark)
+        logger.info(
+            "[refresh][catchup] empty DB — bootstrapping last %d days from %s",
+            INITIAL_WINDOW_DAYS, watermark,
+        )
 
     added = 0
+    pages = 0
+    started = time.monotonic()
     while True:
+        pages += 1
         _fetch_page(f"sr_created_date >= '{watermark}'", "sr_created_date")
         page_rows, page_added = _insert_page(con)
         added += page_added
         if page_rows == 0:
+            logger.info("[refresh][catchup] page %d: empty — done", pages)
             break
         new_max = con.execute(
             "SELECT MAX(sr_created_date) FROM service_requests"
         ).fetchone()[0]
         new_watermark = str(new_max)[:19] if new_max else watermark
+        logger.info(
+            "[refresh][catchup] page %d: %d row(s), %d new, watermark %s -> %s",
+            pages, page_rows, page_added, watermark, new_watermark,
+        )
         if page_rows < PAGE_SIZE or new_watermark == watermark:
             break
         watermark = new_watermark
+    logger.info(
+        "[refresh][catchup] done: %d page(s), %d row(s) added in %.1fs",
+        pages, added, time.monotonic() - started,
+    )
     return added
 
 
 def _do_history(con) -> int:
     """Phase 2 — extend history backward toward HISTORY_FLOOR. No-op once full."""
+    import time
+
     row = con.execute("SELECT MIN(sr_created_date) FROM service_requests").fetchone()
     if not (row and row[0]):
+        logger.info("[refresh][history] skipped — DB is empty (catchup must run first)")
         return 0
     floor = str(row[0])[:19]
+    if floor <= HISTORY_FLOOR:
+        logger.info("[refresh][history] no-op — already at floor %s", HISTORY_FLOOR)
+        return 0
+    logger.info(
+        "[refresh][history] starting from MIN(sr_created_date)=%s toward %s",
+        floor, HISTORY_FLOOR,
+    )
     added = 0
+    pages = 0
+    started = time.monotonic()
     while floor > HISTORY_FLOOR:
+        pages += 1
         _fetch_page(f"sr_created_date < '{floor}'", "sr_created_date DESC")
         page_rows, page_added = _insert_page(con)
         added += page_added
         if page_rows == 0:
+            logger.info("[refresh][history] page %d: empty — reached source floor", pages)
             break
         new_min = con.execute(
             "SELECT MIN(sr_created_date) FROM service_requests"
         ).fetchone()[0]
         new_floor = str(new_min)[:19] if new_min else floor
+        logger.info(
+            "[refresh][history] page %d: %d row(s), %d new, floor %s -> %s",
+            pages, page_rows, page_added, floor, new_floor,
+        )
         if page_rows < PAGE_SIZE or new_floor == floor:
             break
         floor = new_floor
+    logger.info(
+        "[refresh][history] done: %d page(s), %d row(s) added in %.1fs",
+        pages, added, time.monotonic() - started,
+    )
     return added
 
 
