@@ -298,9 +298,13 @@ def duckdb_connect_writer():
 
 
 async def _refresh_loop() -> None:
-    """Sleep first (bootstrap already ran), then full refresh on every interval."""
+    """Run full refresh immediately (history backfill kicks in here), then once per interval.
+
+    Bootstrap already populated the catchup window synchronously in lifespan;
+    the first iteration's catchup is a near no-op, but history backfill runs
+    here on day 1 instead of waiting for the next interval.
+    """
     while True:
-        await asyncio.sleep(REFRESH_INTERVAL_SECS)
         try:
             result = await asyncio.to_thread(_refresh_311_data)
             logger.info("[refresh] %s", result)
@@ -308,6 +312,7 @@ async def _refresh_loop() -> None:
             raise
         except Exception:
             logger.exception("[refresh] cycle failed")
+        await asyncio.sleep(REFRESH_INTERVAL_SECS)
 
 
 @asynccontextmanager
