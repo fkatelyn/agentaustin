@@ -52,6 +52,7 @@ CHARTS_DIR = Path(_volume_mount) / "analysis" / "charts"
 REFRESH_INTERVAL_SECS = int(os.environ.get("REFRESH_INTERVAL_SECS", str(24 * 60 * 60)))
 INITIAL_WINDOW_DAYS = int(os.environ.get("INITIAL_WINDOW_DAYS", "7"))
 SOCRATA_CSV = "https://datahub.austintexas.gov/resource/xwdj-i9he.csv"
+PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "10000"))
 HISTORY_FLOOR = "2014-01-01T00:00:00"
 
 
@@ -64,7 +65,7 @@ def _fetch_page(where: str, order: str) -> int:
         f"{SOCRATA_CSV}?"
         f"$where={urllib.parse.quote(where)}"
         f"&$order={urllib.parse.quote(order)}"
-        f"&$limit=100000"
+        f"&$limit={PAGE_SIZE}"
     )
     req = urllib.request.Request(url, headers={"User-Agent": "agent-austin/1.0"})
     with urllib.request.urlopen(req, timeout=60) as resp:
@@ -129,7 +130,7 @@ def _do_catchup(con) -> int:
             "SELECT MAX(sr_created_date) FROM service_requests"
         ).fetchone()[0]
         new_watermark = str(new_max)[:19] if new_max else watermark
-        if page_rows < 100_000 or new_watermark == watermark:
+        if page_rows < PAGE_SIZE or new_watermark == watermark:
             break
         watermark = new_watermark
     return added
@@ -152,7 +153,7 @@ def _do_history(con) -> int:
             "SELECT MIN(sr_created_date) FROM service_requests"
         ).fetchone()[0]
         new_floor = str(new_min)[:19] if new_min else floor
-        if page_rows < 100_000 or new_floor == floor:
+        if page_rows < PAGE_SIZE or new_floor == floor:
             break
         floor = new_floor
     return added
