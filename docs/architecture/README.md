@@ -52,7 +52,7 @@ The Claude agent running inside the backend has access to **skills** — structu
 
 ### download-311-data
 
-Downloads City of Austin 311 service request data from the Socrata Open Data API (`data.austintexas.gov`) into the local DuckDB. Supports full downloads and incremental delta merges — fetches only rows newer than `MAX(sr_created_date)` and deduplicates by `sr_number`. Handles pagination for datasets exceeding the 100k row API limit. The boot script seeds the last 7 days; the lifespan async task in `main.py` extends both directions every 24h.
+Downloads City of Austin 311 service request data from the Socrata Open Data API (`datahub.austintexas.gov`) into the local DuckDB. Supports full downloads and incremental delta merges — fetches only rows newer than `MAX(sr_created_date)` and deduplicates by `sr_number`. Handles pagination for datasets exceeding the 100k row API limit. The boot script seeds the last 7 days; the lifespan async task in `main.py` extends both directions every 24h.
 
 **Triggers:** "download 311 data", "refresh 311 data", "update 311 data", "fetch Austin 311"
 

@@ -14,9 +14,9 @@ Download City of Austin 311 service request data from the Socrata Open Data API 
 
 ## Data Source
 
-- **Portal:** City of Austin Open Data (data.austintexas.gov)
+- **Portal:** City of Austin Open Data (datahub.austintexas.gov)
 - **Dataset ID:** `xwdj-i9he`
-- **API endpoint:** `https://data.austintexas.gov/resource/xwdj-i9he.csv`
+- **API endpoint:** `https://datahub.austintexas.gov/resource/xwdj-i9he.csv`
 - **No API key required** for reasonable request volumes
 - **Full dataset:** ~2.4M records from 2014-present
 
@@ -47,7 +47,7 @@ LIMIT = 100000
 con = duckdb.connect(DUCKDB_PATH)
 
 # Get total count from API
-count_url = "https://data.austintexas.gov/resource/xwdj-i9he.csv?$select=count(*)&$limit=1"
+count_url = "https://datahub.austintexas.gov/resource/xwdj-i9he.csv?$select=count(*)&$limit=1"
 response = urllib.request.urlopen(count_url)
 total = int(response.read().decode().strip().split('\n')[1].strip('"'))
 print(f"Total records available from API: {total:,}")
@@ -58,7 +58,7 @@ con.execute("DROP TABLE IF EXISTS service_requests")
 offset = 0
 chunk = 0
 while offset < total:
-    url = f"https://data.austintexas.gov/resource/xwdj-i9he.csv?$limit={LIMIT}&$offset={offset}&$order=:id"
+    url = f"https://datahub.austintexas.gov/resource/xwdj-i9he.csv?$limit={LIMIT}&$offset={offset}&$order=:id"
     print(f"Downloading chunk {chunk} (offset={offset:,} / {total:,})...")
     response = urllib.request.urlopen(url)
     tmp = '/tmp/311_chunk.csv'
@@ -122,7 +122,7 @@ total_new = 0
 
 while True:
     url = (
-        f"https://data.austintexas.gov/resource/xwdj-i9he.csv"
+        f"https://datahub.austintexas.gov/resource/xwdj-i9he.csv"
         f"?$where=sr_created_date>='{start_date}'"
         f"&$limit={LIMIT}&$offset={offset}&$order=:id"
     )

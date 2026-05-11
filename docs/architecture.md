@@ -89,8 +89,8 @@ data: [DONE]
 
 Data comes from the **City of Austin Open Data Portal** via Socrata, stored locally in **DuckDB**.
 
-- **Dataset:** [311 Unified Data](https://data.austintexas.gov/City-Government/311-Unified-Data/i26j-ai4z)
-- **API Endpoint:** `https://data.austintexas.gov/resource/xwdj-i9he.csv`
+- **Dataset:** [311 Unified Data](https://datahub.austintexas.gov/City-Government/311-Unified-Data/i26j-ai4z)
+- **API Endpoint:** `https://datahub.austintexas.gov/resource/xwdj-i9he.csv`
 - **Local store:** DuckDB file at `<volume>/311.duckdb`, table `service_requests`, unique index on `sr_number`
 - **Size:** ~2.4M rows (2014–present, ~1,500–2,000 new rows daily)
 - **No API key required** for reasonable request volumes
@@ -134,11 +134,11 @@ sr_location_lat / _long      # Geocoded coordinates
 
 ```bash
 # Get recent 311 requests
-curl "https://data.austintexas.gov/resource/xwdj-i9he.csv?\$where=sr_created_date>='2026-01-01T00:00:00'&\$limit=50000"
+curl "https://datahub.austintexas.gov/resource/xwdj-i9he.csv?\$where=sr_created_date>='2026-01-01T00:00:00'&\$limit=50000"
 
 # Filter by department
-curl "https://data.austintexas.gov/resource/xwdj-i9he.csv?\$where=sr_department_desc='Austin Resource Recovery'"
+curl "https://datahub.austintexas.gov/resource/xwdj-i9he.csv?\$where=sr_department_desc='Austin Resource Recovery'"
 
 # Filter by ZIP code
-curl "https://data.austintexas.gov/resource/xwdj-i9he.csv?\$where=sr_location_zip_code='78704'"
+curl "https://datahub.austintexas.gov/resource/xwdj-i9he.csv?\$where=sr_location_zip_code='78704'"
 ```

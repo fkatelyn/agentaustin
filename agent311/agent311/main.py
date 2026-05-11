@@ -51,7 +51,7 @@ REPORTS_DIR = Path(_volume_mount) / "reports"
 CHARTS_DIR = Path(_volume_mount) / "analysis" / "charts"
 REFRESH_INTERVAL_SECS = int(os.environ.get("REFRESH_INTERVAL_SECS", str(24 * 60 * 60)))
 INITIAL_WINDOW_DAYS = int(os.environ.get("INITIAL_WINDOW_DAYS", "7"))
-SOCRATA_CSV = "https://data.austintexas.gov/resource/xwdj-i9he.csv"
+SOCRATA_CSV = "https://datahub.austintexas.gov/resource/xwdj-i9he.csv"
 HISTORY_FLOOR = "2014-01-01T00:00:00"
 
 
@@ -285,7 +285,7 @@ You help users explore and analyze Austin's 311 service requests, which include:
 - Austin Water (water leaks, pressure issues, billing)
 - Other city services (parks, libraries, health, development)
 
-The 311 dataset contains ~2.4M service requests from 2014-present, available via the City of Austin Open Data Portal (data.austintexas.gov). Data is updated in real-time with 1,500-2,000 new requests daily.
+The 311 dataset contains ~2.4M service requests from 2014-present, available via the City of Austin Open Data Portal (datahub.austintexas.gov). Data is updated in real-time with 1,500-2,000 new requests daily.
 
 ## Data Access — DuckDB
 
@@ -332,7 +332,7 @@ con.execute("SELECT count(*), MIN(sr_created_date), MAX(sr_created_date) FROM se
 ```
 If the row count is low or `MIN(sr_created_date)` is recent, tell the user historical backfill is still in progress and answer with the available window.
 
-For data not in the local database, use the Socrata API: https://data.austintexas.gov/resource/xwdj-i9he.csv (or .json). Use $where, $limit, $order, $select, $group parameters.
+For data not in the local database, use the Socrata API: https://datahub.austintexas.gov/resource/xwdj-i9he.csv (or .json). Use $where, $limit, $order, $select, $group parameters.
 
 CRITICAL — CHART WORKFLOW (you MUST follow these steps exactly):
 1. Write a Python script to /tmp that uses duckdb + plotly to query data and generate a chart
