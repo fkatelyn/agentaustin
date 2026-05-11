@@ -54,6 +54,10 @@ INITIAL_WINDOW_DAYS = int(os.environ.get("INITIAL_WINDOW_DAYS", "7"))
 SOCRATA_CSV = "https://datahub.austintexas.gov/resource/xwdj-i9he.csv"
 PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "10000"))
 FETCH_RETRIES = int(os.environ.get("FETCH_RETRIES", "3"))
+QUERY_DEFAULT_ROWS = int(os.environ.get("QUERY_DEFAULT_ROWS", "1000"))
+QUERY_INLINE_MAX = int(os.environ.get("QUERY_INLINE_MAX", "5000"))
+QUERY_HARD_CAP_ROWS = int(os.environ.get("QUERY_HARD_CAP_ROWS", "1000000"))
+QUERY_PARQUET_TTL_SECS = int(os.environ.get("QUERY_PARQUET_TTL_SECS", "3600"))
 HISTORY_FLOOR = "2014-01-01T00:00:00"
 
 
@@ -398,30 +402,44 @@ Columns:
 - sr_location_map_page — map page reference
 - sr_location_map_tile — map tile reference
 
-**ALWAYS use DuckDB for data analysis.** Write Python scripts that query DuckDB **in read-only mode** so they coexist with the background refresh thread:
-```python
-import duckdb
-con = duckdb.connect('{DUCKDB_PATH}', read_only=True)
-df = con.execute("SELECT ... FROM service_requests ...").fetchdf()
-con.close()
-```
-`fetchdf()` returns a pandas DataFrame — use it directly with plotly for charts.
+**ALWAYS use the `query_duckdb` MCP tool to query the 311 database.** Do NOT shell out to `duckdb` CLI or write Python that calls `duckdb.connect(...)` — `query_duckdb` runs in-process, avoids file-lock contention with the background refresh, and is much faster.
 
-**Data may still be loading.** The table is bootstrapped to the last {INITIAL_WINDOW_DAYS} days on container startup, then backfilled toward 2014 in the background over ~1-2 hours. For any question that spans more than a week of history, **first check the available range** with:
-```python
-con.execute("SELECT count(*), MIN(sr_created_date), MAX(sr_created_date) FROM service_requests").fetchone()
+Usage:
 ```
-If the row count is low or `MIN(sr_created_date)` is recent, tell the user historical backfill is still in progress and answer with the available window.
+query_duckdb(sql="SELECT ... FROM service_requests ...", max_rows=1000)
+```
+
+Response (JSON):
+- `row_count` — total rows in the result
+- `columns` — list of column names
+- `rows` — up to `max_rows` of result rows (default 1000, server-capped at 5000)
+- `truncated` — true if there are more rows than fit inline; false if `rows` is complete
+- `path` — present iff `truncated=true`: parquet file with the FULL result; load via `pd.read_parquet(path)`
+- `size_bytes`, `elapsed_ms` — diagnostics
+- `error` — if the query failed (DuckDB error, or result > 1M row hard cap)
+
+Decision rule for the agent:
+- `truncated=false` → use `rows` directly. Build a DataFrame with `pd.DataFrame(rows, columns=columns)` if needed.
+- `truncated=true` → for full-data analysis, `pd.read_parquet(path)`. The inline rows are a preview.
+
+Note: columns are typed as VARCHAR (data was ingested from CSV). Cast in SQL when needed: `sr_created_date::TIMESTAMP`, `sr_location_lat::DOUBLE`, etc.
+
+**Data may still be loading.** The table is bootstrapped to the last {INITIAL_WINDOW_DAYS} days on container startup, then backfilled toward 2014 in the background. For any question that spans more than a week of history, **first check the available range**:
+```
+query_duckdb("SELECT count(*) AS total, MIN(sr_created_date) AS min_d, MAX(sr_created_date) AS max_d FROM service_requests")
+```
+If row count is low or `min_d` is recent, tell the user historical backfill is still in progress and answer with the available window.
 
 For data not in the local database, use the Socrata API: https://datahub.austintexas.gov/resource/xwdj-i9he.csv (or .json). Use $where, $limit, $order, $select, $group parameters.
 
 CRITICAL — CHART WORKFLOW (you MUST follow these steps exactly):
-1. Write a Python script to /tmp that uses duckdb + plotly to query data and generate a chart
-2. The script must call fig.write_html('/tmp/chart_output.html', include_plotlyjs='cdn')
-3. Run the script with Bash
-4. Read the HTML file content from /tmp/chart_output.html
-5. Call save_chart with filename and the HTML content — save_chart returns the persistent path
-6. Call view_content with the EXACT path returned by save_chart (NOT /tmp)
+1. Use `query_duckdb` to fetch the data you need.
+2. Write a Python script to /tmp that uses **pandas + plotly only** (NO `import duckdb`). Build the DataFrame from the `query_duckdb` result — either embed inline `rows` directly, or `pd.read_parquet(path)` if truncated.
+3. The script must call `fig.write_html('/tmp/chart_output.html', include_plotlyjs='cdn')`.
+4. Run the script with Bash.
+5. Read the HTML file content from `/tmp/chart_output.html`.
+6. Call `save_chart` with filename and the HTML content — `save_chart` returns the persistent path.
+7. Call `view_content` with the EXACT path returned by `save_chart` (NOT /tmp).
 NEVER call view_content with a /tmp path. NEVER use Write tool for chart files. ALWAYS use save_chart.
 Chart style: template='plotly_dark', paper_bgcolor='#1a1a2e', plot_bgcolor='#16213e'.
 Filename convention: <descriptive-name>-chart-<YYYY-MM-DD>.html
@@ -589,9 +607,129 @@ async def save_chart(args: dict):
     return {"content": [{"type": "text", "text": f"Chart saved ({size} bytes). Pass this path to view_content: {file_path}"}]}
 
 
+def _query_json_default(v):
+    import decimal
+    if isinstance(v, (datetime,)):
+        return v.isoformat()
+    if hasattr(v, "isoformat"):
+        return v.isoformat()
+    if isinstance(v, decimal.Decimal):
+        return float(v)
+    if isinstance(v, bytes):
+        return v.decode("utf-8", errors="replace")
+    return str(v)
+
+
+def _cleanup_old_parquets() -> None:
+    """Delete /tmp/q_*.parquet older than QUERY_PARQUET_TTL_SECS. Best-effort."""
+    import time
+    cutoff = time.time() - QUERY_PARQUET_TTL_SECS
+    for p in Path("/tmp").glob("q_*.parquet"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+        except OSError:
+            pass
+
+
+@tool(
+    "query_duckdb",
+    (
+        "Run a read-only SQL query against the 311 DuckDB and return rows as JSON. "
+        "Returns up to max_rows inline (default 1000, server-capped at 5000). "
+        "If the result has more rows, the response also includes a parquet file path "
+        "containing the full result — load it with pd.read_parquet(path). "
+        "Errors out for results larger than 1M rows; refine your query in that case."
+    ),
+    {"sql": str, "max_rows": int},
+)
+async def query_duckdb(args: dict):
+    import time
+    import duckdb
+
+    sql = str(args.get("sql", "")).strip()
+    if not sql:
+        return {"content": [{"type": "text", "text": json.dumps({"error": "sql is required"})}]}
+    if sql.endswith(";"):
+        sql = sql.rstrip(";").rstrip()
+
+    raw_max = args.get("max_rows")
+    max_rows = QUERY_DEFAULT_ROWS if raw_max is None else int(raw_max)
+    max_rows = max(1, min(max_rows, QUERY_INLINE_MAX))
+
+    _cleanup_old_parquets()
+    started = time.monotonic()
+
+    def _run() -> dict:
+        con = duckdb.connect(str(DUCKDB_PATH), read_only=True)
+        try:
+            columns = con.execute(
+                f"SELECT * FROM ({sql}) LIMIT 0"
+            ).description
+            colnames = [c[0] for c in columns] if columns else []
+
+            probe = con.execute(
+                f"SELECT * FROM ({sql}) LIMIT {max_rows + 1}"
+            ).fetchall()
+            truncated = len(probe) > max_rows
+            inline_rows = [list(r) for r in probe[:max_rows]]
+
+            if not truncated:
+                return {
+                    "row_count": len(inline_rows),
+                    "columns": colnames,
+                    "rows": inline_rows,
+                    "truncated": False,
+                }
+
+            row_count = con.execute(f"SELECT count(*) FROM ({sql})").fetchone()[0]
+            if row_count > QUERY_HARD_CAP_ROWS:
+                return {
+                    "error": (
+                        f"result too large ({row_count:,} rows > {QUERY_HARD_CAP_ROWS:,} cap); "
+                        f"add LIMIT, GROUP BY, or a WHERE filter"
+                    ),
+                    "row_count": row_count,
+                }
+
+            path = Path("/tmp") / f"q_{uuid.uuid4().hex[:8]}.parquet"
+            con.execute(
+                f"COPY ({sql}) TO '{path}' (FORMAT PARQUET, COMPRESSION SNAPPY)"
+            )
+            return {
+                "row_count": row_count,
+                "columns": colnames,
+                "rows": inline_rows,
+                "truncated": True,
+                "path": str(path),
+                "size_bytes": path.stat().st_size,
+            }
+        finally:
+            con.close()
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except duckdb.Error as exc:
+        result = {"error": f"{type(exc).__name__}: {exc}"}
+    except Exception as exc:
+        logger.exception("[query_duckdb] unexpected failure")
+        result = {"error": f"{type(exc).__name__}: {exc}"}
+
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+    logger.info(
+        "[query_duckdb] %s elapsed=%dms %s",
+        "ERROR" if "error" in result else (f"row_count={result.get('row_count')}"),
+        result["elapsed_ms"],
+        ("truncated" if result.get("truncated") else "inline") if "error" not in result else "",
+    )
+
+    payload = json.dumps(result, default=_query_json_default, ensure_ascii=False)
+    return {"content": [{"type": "text", "text": payload}]}
+
+
 agent311_host_tools = create_sdk_mcp_server(
     name="agent311_host",
-    tools=[view_content, save_report, save_chart],
+    tools=[view_content, save_report, save_chart, query_duckdb],
 )
 
 
@@ -657,6 +795,7 @@ async def _stream_chat(messages: list, session_id: str | None, user_msg_id: str 
             "mcp__agent311_host__view_content",
             "mcp__agent311_host__save_report",
             "mcp__agent311_host__save_chart",
+            "mcp__agent311_host__query_duckdb",
         ],
         permission_mode="acceptEdits",
         max_turns=60,
@@ -702,6 +841,16 @@ async def _stream_chat(messages: list, session_id: str | None, user_msg_id: str 
                                     fname = block_input.get("filename", "")
                                     if isinstance(fname, str) and fname.strip():
                                         marker = f"[Using tool: save_report {fname}]\\n"
+                                        await queue.put(f"data: {json.dumps({'type': 'text-delta', 'id': msg_id, 'delta': marker})}\n\n")
+                                        continue
+                                if block.name == "mcp__agent311_host__query_duckdb":
+                                    block_input = block.input if isinstance(block.input, dict) else {}
+                                    sql_value = block_input.get("sql", "")
+                                    if isinstance(sql_value, str) and sql_value.strip():
+                                        snippet = " ".join(sql_value.split())
+                                        if len(snippet) > 120:
+                                            snippet = snippet[:117] + "..."
+                                        marker = f"[Using tool: query_duckdb `{snippet}`]\\n"
                                         await queue.put(f"data: {json.dumps({'type': 'text-delta', 'id': msg_id, 'delta': marker})}\n\n")
                                         continue
                                 tool_marker = f"[Using tool: {block.name}]\\n"
