@@ -53,11 +53,18 @@ REFRESH_INTERVAL_SECS = int(os.environ.get("REFRESH_INTERVAL_SECS", str(24 * 60 
 INITIAL_WINDOW_DAYS = int(os.environ.get("INITIAL_WINDOW_DAYS", "7"))
 SOCRATA_CSV = "https://datahub.austintexas.gov/resource/xwdj-i9he.csv"
 PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "10000"))
+FETCH_RETRIES = int(os.environ.get("FETCH_RETRIES", "3"))
 HISTORY_FLOOR = "2014-01-01T00:00:00"
 
 
 def _fetch_page(where: str, order: str) -> int:
-    """Fetch one Socrata page into /tmp/311_page.csv. Returns size in bytes."""
+    """Fetch one Socrata page into /tmp/311_page.csv. Returns size in bytes.
+
+    Retries up to FETCH_RETRIES times with exponential backoff (1s, 2s, 4s, ...)
+    on any urllib error; re-raises after the last attempt.
+    """
+    import time
+    import urllib.error
     import urllib.parse
     import urllib.request
 
@@ -68,10 +75,22 @@ def _fetch_page(where: str, order: str) -> int:
         f"&$limit={PAGE_SIZE}"
     )
     req = urllib.request.Request(url, headers={"User-Agent": "agent-austin/1.0"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        body = resp.read()
-    Path("/tmp/311_page.csv").write_bytes(body)
-    return len(body)
+    for attempt in range(FETCH_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                body = resp.read()
+            Path("/tmp/311_page.csv").write_bytes(body)
+            return len(body)
+        except urllib.error.URLError as exc:
+            if attempt == FETCH_RETRIES:
+                raise
+            delay = 2 ** attempt
+            logger.warning(
+                "[refresh] fetch failed (attempt %d/%d): %s — retrying in %ds",
+                attempt + 1, FETCH_RETRIES + 1, exc, delay,
+            )
+            time.sleep(delay)
+    return 0  # unreachable
 
 
 def _insert_page(con) -> tuple[int, int]:
