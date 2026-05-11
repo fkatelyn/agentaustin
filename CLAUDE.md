@@ -111,7 +111,7 @@ npm run start
 ## Data & Persistent Storage
 
 - **Volume mount:** `RAILWAY_VOLUME_MOUNT_PATH` on Railway; falls back to `data/` relative to `agent311/` locally
-- **DuckDB:** `<volume>/311.duckdb` — all 311 data (~7.8M rows from 2014-present), table `service_requests` with a unique index on `sr_number`
+- **DuckDB:** `<volume>/311.duckdb` — all 311 data (~2.4M rows from 2014-present), table `service_requests` with a unique index on `sr_number`
 - **Reports:** `<volume>/reports/` — user-curated HTML/CSV/PNG reports, shown in sidebar file tree
 - **Charts:** `<volume>/analysis/charts/` — agent-generated plotly charts, previewed in artifact panel
 - The `data/` directory is gitignored — generated data should never be committed

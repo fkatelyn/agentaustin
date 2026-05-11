@@ -92,7 +92,7 @@ Data comes from the **City of Austin Open Data Portal** via Socrata, stored loca
 - **Dataset:** [311 Unified Data](https://data.austintexas.gov/City-Government/311-Unified-Data/i26j-ai4z)
 - **API Endpoint:** `https://data.austintexas.gov/resource/xwdj-i9he.csv`
 - **Local store:** DuckDB file at `<volume>/311.duckdb`, table `service_requests`, unique index on `sr_number`
-- **Size:** ~7.8M rows (2014–present, ~1,500–2,000 new rows daily)
+- **Size:** ~2.4M rows (2014–present, ~1,500–2,000 new rows daily)
 - **No API key required** for reasonable request volumes
 
 ### Refresh model
