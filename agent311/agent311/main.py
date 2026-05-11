@@ -285,7 +285,7 @@ You help users explore and analyze Austin's 311 service requests, which include:
 - Austin Water (water leaks, pressure issues, billing)
 - Other city services (parks, libraries, health, development)
 
-The 311 dataset contains ~7.8M service requests from 2014-present, available via the City of Austin Open Data Portal (data.austintexas.gov). Data is updated in real-time with 1,500-2,000 new requests daily.
+The 311 dataset contains ~2.4M service requests from 2014-present, available via the City of Austin Open Data Portal (data.austintexas.gov). Data is updated in real-time with 1,500-2,000 new requests daily.
 
 ## Data Access — DuckDB
 

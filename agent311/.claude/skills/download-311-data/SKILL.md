@@ -18,7 +18,7 @@ Download City of Austin 311 service request data from the Socrata Open Data API 
 - **Dataset ID:** `xwdj-i9he`
 - **API endpoint:** `https://data.austintexas.gov/resource/xwdj-i9he.csv`
 - **No API key required** for reasonable request volumes
-- **Full dataset:** ~7.8M records from 2014-present
+- **Full dataset:** ~2.4M records from 2014-present
 
 ## DuckDB Path
 
